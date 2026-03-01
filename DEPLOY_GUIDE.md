@@ -48,7 +48,8 @@ sudo systemctl start nginx
 
 2. **拉取新代码**：
    ```bash
-   sudo git clone https://github.com/yourusername/expert-workspace.git /var/www/zeosite
+   sudo git clone https://github.com/Hongrui-Ji/expert-service-mate /var/www/zeosite
+   
    
    # 如果是私有仓库，可能需要配置 SSH Key 或输入账号密码
    ```
