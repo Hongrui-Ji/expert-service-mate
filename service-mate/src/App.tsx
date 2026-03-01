@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { 
   Calendar, 
   Upload, 
@@ -11,6 +11,8 @@ import {
   X, 
   ChevronLeft, 
   ChevronRight,
+  ChevronDown,
+  Check,
   Download,
   Trash2,
   Edit2,
@@ -63,6 +65,7 @@ interface Store {
   assignedExpert: string; 
   specialRequirements?: string;
   monthlyFrequency: number; 
+  importStatus?: string; // 新增字段
 }
 
 interface Visit {
@@ -78,6 +81,89 @@ interface ToastMsg {
   message: string;
   type: 'success' | 'error' | 'info';
 }
+
+interface MultiSelectProps {
+  label: string;
+  options: string[];
+  value: string[];
+  onChange: (val: string[]) => void;
+}
+
+const MultiSelect: React.FC<MultiSelectProps> = ({ label, options, value, onChange }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (wrapperRef.current && !wrapperRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [wrapperRef]);
+
+  const handleSelect = (option: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    let newValue: string[];
+    if (option === '全部') {
+      newValue = ['全部'];
+    } else {
+      if (value.includes('全部')) {
+        newValue = [option];
+      } else {
+        if (value.includes(option)) {
+          newValue = value.filter(v => v !== option);
+          if (newValue.length === 0) newValue = ['全部'];
+        } else {
+          newValue = [...value, option];
+        }
+      }
+    }
+    onChange(newValue);
+  };
+
+  const displayValue = value.includes('全部') 
+    ? '全部' 
+    : value.length === 1 
+      ? value[0] 
+      : `已选 ${value.length} 项`;
+
+  return (
+    <div className="relative" ref={wrapperRef}>
+      <div className="flex flex-col gap-1 min-w-[140px] relative z-20">
+        <span className="text-[10px] text-gray-400 font-bold uppercase">{label}</span>
+        <button 
+          onClick={(e) => { e.stopPropagation(); setIsOpen(!isOpen); }}
+          className="p-2 border rounded text-sm bg-white text-left flex justify-between items-center w-full"
+        >
+          <span className="truncate max-w-[100px]">{displayValue}</span>
+          <ChevronDown size={14} className="text-gray-400 flex-shrink-0 ml-1"/>
+        </button>
+      </div>
+      
+      {isOpen && (
+        <div 
+          className="absolute top-full left-0 mt-1 w-full min-w-[200px] max-h-60 overflow-y-auto bg-white border border-gray-200 rounded-lg shadow-lg z-50 p-1"
+          onClick={(e) => e.stopPropagation()} // 阻止冒泡到父级可能的点击监听
+        >
+          {options.map(opt => (
+            <div 
+              key={opt}
+              onClick={(e) => handleSelect(opt, e)}
+              className={`flex items-center gap-2 p-2 rounded cursor-pointer text-sm ${value.includes(opt) ? 'bg-blue-50 text-blue-600 font-medium' : 'hover:bg-gray-50'}`}
+            >
+              <div className={`w-4 h-4 border rounded flex items-center justify-center flex-shrink-0 ${value.includes(opt) ? 'bg-blue-600 border-blue-600' : 'border-gray-300'}`}>
+                {value.includes(opt) && <Check size={10} className="text-white"/>}
+              </div>
+              <span className="truncate">{opt}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 export default function App() {
   // 状态管理
@@ -118,9 +204,10 @@ export default function App() {
   const [csvText, setCsvText] = useState('');
   const [editingStore, setEditingStore] = useState<Store | null>(null); 
   // const [newExpertName, setNewExpertName] = useState(''); // 已移除
-  const [adminFilterCity, setAdminFilterCity] = useState('全部');
-  const [adminFilterBrand, setAdminFilterBrand] = useState('全部');
-  const [adminFilterExpert, setAdminFilterExpert] = useState('全部');
+  const [adminFilterCity, setAdminFilterCity] = useState<string[]>(['全部']);
+  const [adminFilterBrand, setAdminFilterBrand] = useState<string[]>(['全部']);
+  const [adminFilterExpert, setAdminFilterExpert] = useState<string[]>(['全部']);
+  const [adminFilterImportStatus, setAdminFilterImportStatus] = useState('否'); // 默认显示未导入门店
   const [adminSearchTerm, setAdminSearchTerm] = useState('');
 
   // --- 辅助函数 ---
@@ -314,11 +401,16 @@ export default function App() {
 
   // 专家管理逻辑已移除，由账号管理统一接管
 
+  // [修改] 仅显示未导入的门店用于排班
+  const schedulableStores = useMemo(() => {
+    return stores.filter(s => s.importStatus !== '是');
+  }, [stores]);
+
   const myStores = useMemo(() => {
     // 强制过滤当前专家，不再支持“全部”
     if (!currentUser) return [];
-    return stores.filter(s => s.assignedExpert === currentUser);
-  }, [stores, currentUser]);
+    return schedulableStores.filter(s => s.assignedExpert === currentUser);
+  }, [schedulableStores, currentUser]);
 
   const currentMonthVisits = useMemo(() => {
     return visits.filter(v => v.expertName === currentUser);
@@ -344,43 +436,61 @@ export default function App() {
 
   // [修改] 实现筛选属性的拼音排序和级联联动
   const uniqueCities = useMemo(() => {
-    const cities = Array.from(new Set(stores.map(s => s.city))).filter(Boolean);
+    const cities = Array.from(new Set(stores.map(s => s.city))).filter(c => typeof c === 'string' && c.trim() !== '');
     return ['全部', ...cities.sort((a, b) => a.localeCompare(b, 'zh-CN'))];
   }, [stores]);
 
   const uniqueBrands = useMemo(() => {
     let filtered = stores;
-    if (adminFilterCity !== '全部') {
-      filtered = filtered.filter(s => s.city === adminFilterCity);
+    if (!adminFilterCity.includes('全部')) {
+      filtered = filtered.filter(s => adminFilterCity.includes(s.city));
     }
-    const brands = Array.from(new Set(filtered.map(s => s.brand))).filter(Boolean);
+    const brands = Array.from(new Set(filtered.map(s => s.brand))).filter(b => typeof b === 'string' && b.trim() !== '');
     return ['全部', ...brands.sort((a, b) => a.localeCompare(b, 'zh-CN'))];
   }, [stores, adminFilterCity]);
 
   const sortedExperts = useMemo(() => {
-    return [...experts].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+    // 过滤非字符串数据，防止 localeCompare 报错
+    return experts.filter(e => typeof e === 'string').sort((a, b) => a.localeCompare(b, 'zh-CN'));
   }, [experts]);
 
   // [新增] 当联动筛选导致当前选中项无效时，自动重置
   useEffect(() => {
-    if (adminFilterCity !== '全部' && !uniqueCities.includes(adminFilterCity)) {
-      setAdminFilterCity('全部');
+    if (!adminFilterCity.includes('全部')) {
+        // 简单逻辑：如果筛选城市变了，品牌可能不再有效，重置品牌
+        // 更复杂的逻辑是检查当前选中的品牌是否还在 uniqueBrands 中
+        const validBrands = uniqueBrands;
+        const isValid = adminFilterBrand.every(b => validBrands.includes(b));
+        if (!isValid) setAdminFilterBrand(['全部']);
     }
-  }, [uniqueCities, adminFilterCity]);
+  }, [uniqueBrands, adminFilterCity, adminFilterBrand]);
 
   const filteredStores = useMemo(() => {
     return stores.filter(store => {
-      const matchCity = adminFilterCity === '全部' || store.city === adminFilterCity;
-      const matchBrand = adminFilterBrand === '全部' || store.brand === adminFilterBrand;
-      let matchExpert = true;
-      if (adminFilterExpert === '待分配') matchExpert = !store.assignedExpert;
-      else if (adminFilterExpert !== '全部') matchExpert = store.assignedExpert === adminFilterExpert;
+      const matchCity = adminFilterCity.includes('全部') || adminFilterCity.includes(store.city);
+      const matchBrand = adminFilterBrand.includes('全部') || adminFilterBrand.includes(store.brand);
       
+      let matchExpert = true;
+      if (adminFilterExpert.includes('全部')) {
+        matchExpert = true;
+      } else {
+        const hasUnassigned = adminFilterExpert.includes('待分配');
+        const hasSpecific = adminFilterExpert.some(e => e !== '待分配' && e !== '全部');
+        
+        if (hasUnassigned && !store.assignedExpert) matchExpert = true;
+        else if (hasSpecific && adminFilterExpert.includes(store.assignedExpert)) matchExpert = true;
+        else matchExpert = false;
+      }
+      
+      const matchImportStatus = 
+        adminFilterImportStatus === '全部' || 
+        (adminFilterImportStatus === '是' ? store.importStatus === '是' : store.importStatus !== '是');
+
       const searchLower = adminSearchTerm.toLowerCase();
       const matchSearch = store.name.toLowerCase().includes(searchLower) || store.id.toLowerCase().includes(searchLower);
-      return matchCity && matchBrand && matchExpert && matchSearch;
+      return matchCity && matchBrand && matchExpert && matchImportStatus && matchSearch;
     });
-  }, [stores, adminFilterCity, adminFilterBrand, adminFilterExpert, adminSearchTerm]);
+  }, [stores, adminFilterCity, adminFilterBrand, adminFilterExpert, adminFilterImportStatus, adminSearchTerm]);
 
   // 批量/单选 门店
   const toggleStoreSelection = (storeId: string) => {
@@ -458,7 +568,7 @@ export default function App() {
           continue;
         } 
         
-        // 严格按照 7 列顺序：1. ID, 2. 名称, 3. 品牌, 4. 城市, 5. 专家, 6. 频次, 7. 需求
+        // 严格按照 8 列顺序：1. ID, 2. 名称, 3. 品牌, 4. 城市, 5. 专家, 6. 频次, 7. 需求, 8. 导入状态
         const id = cols[0];
         const name = cols[1];
         const brand = cols[2];
@@ -478,10 +588,12 @@ export default function App() {
         }
         
         const specialRequirements = cols[6] || '';
+        const importStatus = cols[7] || ''; // 新增字段解析
 
         newStores.push({
           id, name, brand, city,
-          assignedExpert, specialRequirements, monthlyFrequency: frequency
+          assignedExpert, specialRequirements, monthlyFrequency: frequency,
+          importStatus
         });
       }
       const res = await authenticatedFetch(`${API_BASE}/stores/batch`, {
@@ -502,7 +614,7 @@ export default function App() {
   };
 
   const handleExport = () => {
-    let csvContent = "\ufeff门店ID,门店名称,品牌,城市,负责专家,服务频次,特殊需求\n";
+    let csvContent = "\ufeff门店ID,门店名称,品牌,城市,负责专家,服务频次,特殊需求,导入状态\n";
     stores.forEach(store => {
       const row = [
         store.id, 
@@ -511,7 +623,8 @@ export default function App() {
         store.city || '', 
         store.assignedExpert || '', 
         store.monthlyFrequency, 
-        store.specialRequirements || ''
+        store.specialRequirements || '',
+        store.importStatus || ''
       ].map(field => `"${field}"`).join(",");
       csvContent += row + "\n";
     });
@@ -541,17 +654,20 @@ export default function App() {
   const handleSaveEdit = async () => {
     if (!editingStore) return;
     try {
-      const res = await authenticatedFetch(`${API_BASE}/stores/batch`, {
-        method: 'POST',
+      const res = await authenticatedFetch(`${API_BASE}/stores/${editingStore.id}`, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify([editingStore])
+        body: JSON.stringify(editingStore)
       });
       if (res.ok) {
         setStores(stores.map(s => s.id === editingStore.id ? editingStore : s));
         setEditingStore(null);
         showToast('已保存', 'success');
+      } else {
+        const data = await res.json();
+        showToast(data.error || '保存失败', 'error');
       }
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error(e); showToast('保存出错', 'error'); }
   };
 
   // --- 视图渲染 ---
@@ -796,9 +912,7 @@ export default function App() {
           </div>
           <div className="hidden md:flex items-center gap-6">
             <button onClick={() => setActiveTab('calendar')} className={`flex items-center gap-2 px-3 py-2 rounded-md transition ${activeTab === 'calendar' ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-600 hover:bg-gray-100'}`}><Calendar size={18} /> 排班日历</button>
-            {user.role === 'admin' && (
-              <button onClick={() => setActiveTab('admin')} className={`flex items-center gap-2 px-3 py-2 rounded-md transition ${activeTab === 'admin' ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-600 hover:bg-gray-100'}`}><Upload size={18} /> 数据管理</button>
-            )}
+            <button onClick={() => setActiveTab('admin')} className={`flex items-center gap-2 px-3 py-2 rounded-md transition ${activeTab === 'admin' ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-600 hover:bg-gray-100'}`}><Upload size={18} /> 门店库</button>
             <div className="h-6 w-px bg-gray-300"></div>
             
             <div className="flex items-center gap-4">
@@ -839,18 +953,17 @@ export default function App() {
         {isMobileMenuOpen && (
           <div className="md:hidden mt-3 pt-3 border-t border-gray-100 space-y-2 pb-2">
              <button onClick={() => { setActiveTab('calendar'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-3 py-3 rounded-lg ${activeTab === 'calendar' ? 'bg-blue-50 text-blue-700' : 'text-gray-600'}`}><Calendar size={20} /> 排班日历</button>
-            {user.role === 'admin' && (
-              <button onClick={() => { setActiveTab('admin'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-3 py-3 rounded-lg ${activeTab === 'admin' ? 'bg-blue-50 text-blue-700' : 'text-gray-600'}`}><Upload size={20} /> 数据管理 & 导入</button>
-            )}
+            <button onClick={() => { setActiveTab('admin'); setIsMobileMenuOpen(false); }} className={`w-full flex items-center gap-3 px-3 py-3 rounded-lg ${activeTab === 'admin' ? 'bg-blue-50 text-blue-700' : 'text-gray-600'}`}><Upload size={20} /> 门店库</button>
             <button onClick={handleLogout} className="w-full flex items-center gap-3 px-3 py-3 rounded-lg text-red-600"><LogOut size={20} /> 退出登录</button>
           </div>
         )}
       </nav>
 
       <main className="flex-1 max-w-7xl mx-auto w-full p-4 h-[calc(100vh-64px)] overflow-hidden flex flex-col">
-        {activeTab === 'admin' && user.role === 'admin' && (
+        {activeTab === 'admin' && (
           <div className="space-y-6 animate-in fade-in duration-300 h-full overflow-y-auto pb-20 custom-scrollbar">
-            {/* 账号管理 */}
+            {/* 账号管理 - 仅管理员可见 */}
+            {user.role === 'admin' && (
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
               <div className="flex justify-between items-center mb-4">
                 <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
@@ -902,10 +1015,13 @@ export default function App() {
                   </table>
                 </div>
               </div>
+            )}
 
               {/* 专家筛选列表 UI 已移除，直接使用账号管理 */}
             
 
+            {/* 批量导入 - 仅管理员可见 */}
+            {user.role === 'admin' && (
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
                 <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2"><Upload className="text-blue-600" size={20}/> 批量导入门店数据</h2>
                 <div className="space-y-4">
@@ -913,25 +1029,27 @@ export default function App() {
                     <p className="font-bold mb-1">导入格式说明 (支持 Excel 直接粘贴)</p>
                     <p className="text-xs opacity-90 leading-relaxed">
                       请严格按照以下顺序排列列：<br/>
-                      1. 门店ID | 2. 门店名称 | 3. 品牌 | 4. 城市 | 5. 负责专家 | 6. 频次 | 7. 特殊需求
+                      1. 门店ID | 2. 门店名称 | 3. 品牌 | 4. 城市 | 5. 负责专家 | 6. 频次 | 7. 特殊需求 | 8. 导入状态(是/否)
                     </p>
                   </div>
-                  <textarea value={csvText} onChange={(e) => setCsvText(e.target.value)} placeholder="在此处粘贴 Excel 数据 (ID, 名称, 品牌, 城市, 专家, 频次, 需求)..." className="w-full h-24 p-3 border border-gray-300 rounded-lg text-sm font-mono outline-none"/>
+                  <textarea value={csvText} onChange={(e) => setCsvText(e.target.value)} placeholder="在此处粘贴 Excel 数据 (ID, 名称, 品牌, 城市, 专家, 频次, 需求, 导入状态)..." className="w-full h-24 p-3 border border-gray-300 rounded-lg text-sm font-mono outline-none"/>
                   <button onClick={handleImport} className="bg-blue-600 text-white px-6 py-2 rounded-lg text-sm font-medium hover:bg-blue-700">确认导入 / 更新</button>
                 </div>
             </div>
+            )}
 
-            <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-              <div className="px-4 py-4 border-b border-gray-200 bg-gray-50 flex flex-col gap-4">
+            <div className="bg-white rounded-xl shadow-sm border border-gray-200">
+              <div className="px-4 py-4 border-b border-gray-200 bg-gray-50 flex flex-col gap-4 rounded-t-xl">
                 <div className="flex justify-between items-center">
                   <h3 className="font-bold text-gray-700">门店库 ({filteredStores.length})</h3>
                   <div className="flex items-center gap-2">
-                    {(adminFilterCity !== '全部' || adminFilterBrand !== '全部' || adminFilterExpert !== '全部' || adminSearchTerm) && (
+                    {(!adminFilterCity.includes('全部') || !adminFilterBrand.includes('全部') || !adminFilterExpert.includes('全部') || adminFilterImportStatus !== '否' || adminSearchTerm) && (
                       <button 
                         onClick={() => {
-                          setAdminFilterCity('全部');
-                          setAdminFilterBrand('全部');
-                          setAdminFilterExpert('全部');
+                          setAdminFilterCity(['全部']);
+                          setAdminFilterBrand(['全部']);
+                          setAdminFilterExpert(['全部']);
+                          setAdminFilterImportStatus('否');
                           setAdminSearchTerm('');
                         }}
                         className="text-xs text-red-500 hover:underline"
@@ -948,36 +1066,43 @@ export default function App() {
                   
                   <div className="flex flex-wrap gap-2 items-center">
                     <div className="flex flex-col gap-1 min-w-[140px]">
-                      <span className="text-[10px] text-gray-400 font-bold uppercase">城市</span>
+                      <span className="text-[10px] text-gray-400 font-bold uppercase">是否导入</span>
                       <select 
-                        value={adminFilterCity} 
-                        onChange={(e) => setAdminFilterCity(e.target.value)} 
+                        value={adminFilterImportStatus} 
+                        onChange={(e) => setAdminFilterImportStatus(e.target.value)} 
                         className="p-2 border rounded text-sm bg-white"
                       >
-                        {uniqueCities.map(c=><option key={c} value={c}>{c}</option>)}
+                        <option value="否">否 (默认)</option>
+                        <option value="是">是</option>
+                        <option value="全部">全部</option>
                       </select>
                     </div>
 
-                    <div className="flex flex-col gap-1 min-w-[120px]">
-                      <span className="text-[10px] text-gray-400 font-bold uppercase">品牌</span>
-                      <select value={adminFilterBrand} onChange={(e) => setAdminFilterBrand(e.target.value)} className="p-2 border rounded text-sm bg-white">
-                        {uniqueBrands.map(b=><option key={b} value={b}>{b === '全部' ? '所有品牌' : b}</option>)}
-                      </select>
-                    </div>
+                    <MultiSelect
+                      label="城市"
+                      options={uniqueCities}
+                      value={adminFilterCity}
+                      onChange={setAdminFilterCity}
+                    />
 
-                    <div className="flex flex-col gap-1 min-w-[120px]">
-                      <span className="text-[10px] text-gray-400 font-bold uppercase">专家</span>
-                      <select value={adminFilterExpert} onChange={(e) => setAdminFilterExpert(e.target.value)} className="p-2 border rounded text-sm bg-white">
-                        <option value="全部">所有专家</option>
-                        <option value="待分配">待分配</option>
-                        {sortedExperts.map(e=><option key={e} value={e}>{e}</option>)}
-                      </select>
-                    </div>
+                    <MultiSelect
+                      label="品牌"
+                      options={uniqueBrands}
+                      value={adminFilterBrand}
+                      onChange={setAdminFilterBrand}
+                    />
+
+                    <MultiSelect
+                      label="专家"
+                      options={['全部', '待分配', ...sortedExperts]}
+                      value={adminFilterExpert}
+                      onChange={setAdminFilterExpert}
+                    />
                   </div>
                 </div>
               </div>
 
-              <div className="hidden md:block overflow-x-auto">
+              <div className="hidden md:block overflow-x-auto rounded-b-xl">
                 <table className="w-full text-sm text-left">
                   <thead className="text-xs text-gray-500 uppercase bg-gray-50 border-b">
                     <tr>
@@ -988,6 +1113,7 @@ export default function App() {
                       <th className="px-4 py-3 text-center">频次</th>
                       <th className="px-4 py-3">负责专家</th>
                       <th className="px-4 py-3">特殊需求</th>
+                      <th className="px-4 py-3">导入状态</th>
                       <th className="px-4 py-3 text-right">操作</th>
                     </tr>
                   </thead>
@@ -1000,10 +1126,17 @@ export default function App() {
                       <td className="px-4 py-4 text-center font-medium text-blue-600">{store.monthlyFrequency}次/月</td>
                       <td className="px-4 py-4 font-medium">{store.assignedExpert || <span className="text-red-500 text-xs italic">待分配</span>}</td>
                       <td className="px-4 py-4 text-xs text-gray-400 max-w-[150px] truncate" title={store.specialRequirements}>{store.specialRequirements || '-'}</td>
+                      <td className="px-4 py-4 text-xs">
+                        {store.importStatus ? (
+                           <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${store.importStatus === '是' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>{store.importStatus}</span>
+                        ) : <span className="text-gray-300">-</span>}
+                      </td>
                       <td className="px-4 py-4 text-right">
                         <div className="flex justify-end gap-2">
                           <button onClick={() => setEditingStore(store)} className="text-blue-600 hover:bg-blue-50 p-1.5 rounded-lg transition"><Edit2 size={16}/></button>
-                          <button onClick={() => handleDeleteStore(store.id)} className="text-red-600 hover:bg-red-50 p-1.5 rounded-lg transition"><Trash2 size={16}/></button>
+                          {user.role === 'admin' && (
+                            <button onClick={() => handleDeleteStore(store.id)} className="text-red-600 hover:bg-red-50 p-1.5 rounded-lg transition"><Trash2 size={16}/></button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -1033,9 +1166,11 @@ export default function App() {
                       <button onClick={() => setEditingStore(store)} className="flex items-center gap-1 text-sm text-blue-600 bg-blue-50 px-3 py-1.5 rounded-md">
                         <Edit2 size={14}/> 编辑
                       </button>
-                      <button onClick={() => handleDeleteStore(store.id)} className="flex items-center gap-1 text-sm text-red-600 bg-red-50 px-3 py-1.5 rounded-md">
-                        <Trash2 size={14}/> 删除
-                      </button>
+                      {user.role === 'admin' && (
+                        <button onClick={() => handleDeleteStore(store.id)} className="flex items-center gap-1 text-sm text-red-600 bg-red-50 px-3 py-1.5 rounded-md">
+                          <Trash2 size={14}/> 删除
+                        </button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -1050,9 +1185,10 @@ export default function App() {
             <div className="hidden lg:flex lg:w-72 w-full flex-shrink-0 flex-col bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                 <div className="p-4 bg-gray-50 border-b border-gray-200">
                   <h3 className="font-bold text-gray-800 flex items-center justify-between"><span>待安排门店</span><span className="bg-orange-100 text-orange-800 text-xs px-2 py-1 rounded-full">{unscheduledStores.length}</span></h3>
-                  <p className="text-xs text-gray-500 mt-1">{currentUser} 本月剩余任务</p>
+                  <p className="text-xs text-gray-500 mt-1">{currentUser} 本月剩余任务 (仅显示未导入门店)</p>
                 </div>
                 <div className="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar">
+                  {unscheduledStores.length === 0 && <div className="text-center text-gray-400 py-8 text-xs">没有未导入的待办任务</div>}
                   {unscheduledStores.map(store => {
                     const isSelected = selectedStoreIds.includes(store.id);
                     return (
@@ -1134,15 +1270,52 @@ export default function App() {
              <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center"><h3 className="font-bold text-gray-800">编辑门店</h3><button onClick={() => setEditingStore(null)}><X size={20}/></button></div>
              <div className="p-6 space-y-4">
                <div className="grid grid-cols-2 gap-4">
-                 <div><label className="block text-sm font-medium text-gray-700 mb-1">门店名称</label><input type="text" value={editingStore.name} onChange={(e) => setEditingStore({...editingStore, name: e.target.value})} className="w-full p-2 border rounded text-sm"/></div>
-                 <div><label className="block text-sm font-medium text-gray-700 mb-1">品牌</label><input type="text" value={editingStore.brand} onChange={(e) => setEditingStore({...editingStore, brand: e.target.value})} className="w-full p-2 border rounded text-sm"/></div>
+                 <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">门店名称</label>
+                    {user.role === 'admin' ? (
+                      <input type="text" value={editingStore.name} onChange={(e) => setEditingStore({...editingStore, name: e.target.value})} className="w-full p-2 border rounded text-sm"/>
+                    ) : (
+                      <div className="w-full p-2 bg-gray-50 border border-gray-200 rounded text-sm text-gray-600">{editingStore.name}</div>
+                    )}
+                 </div>
+                 <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">品牌</label>
+                    {user.role === 'admin' ? (
+                      <input type="text" value={editingStore.brand} onChange={(e) => setEditingStore({...editingStore, brand: e.target.value})} className="w-full p-2 border rounded text-sm"/>
+                    ) : (
+                      <div className="w-full p-2 bg-gray-50 border border-gray-200 rounded text-sm text-gray-600">{editingStore.brand}</div>
+                    )}
+                 </div>
                </div>
                <div className="grid grid-cols-2 gap-4">
-                 <div><label className="block text-sm font-medium text-gray-700 mb-1">城市</label><input type="text" value={editingStore.city} onChange={(e) => setEditingStore({...editingStore, city: e.target.value})} className="w-full p-2 border rounded text-sm"/></div>
+                 <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">城市</label>
+                    {user.role === 'admin' ? (
+                      <input type="text" value={editingStore.city} onChange={(e) => setEditingStore({...editingStore, city: e.target.value})} className="w-full p-2 border rounded text-sm"/>
+                    ) : (
+                      <div className="w-full p-2 bg-gray-50 border border-gray-200 rounded text-sm text-gray-600">{editingStore.city}</div>
+                    )}
+                 </div>
                  <div><label className="block text-sm font-medium text-gray-700 mb-1">服务频次</label><input type="number" min="1" value={editingStore.monthlyFrequency} onChange={(e) => setEditingStore({...editingStore, monthlyFrequency: parseInt(e.target.value)})} className="w-full p-2 border rounded text-sm"/></div>
                </div>
                <div><label className="block text-sm font-medium text-gray-700 mb-1">负责专家</label><select value={editingStore.assignedExpert} onChange={(e) => setEditingStore({...editingStore, assignedExpert: e.target.value})} className="w-full p-2 border rounded text-sm bg-white"><option value="">待分配</option>{sortedExperts.map(e=><option key={e} value={e}>{e}</option>)}</select></div>
                <div><label className="block text-sm font-medium text-gray-700 mb-1">特殊需求</label><textarea rows={2} value={editingStore.specialRequirements} onChange={(e) => setEditingStore({...editingStore, specialRequirements: e.target.value})} className="w-full p-2 border rounded text-sm"/></div>
+               <div>
+                   <label className="block text-sm font-medium text-gray-700 mb-1">导入状态</label>
+                   {user.role === 'admin' ? (
+                   <select 
+                     value={editingStore.importStatus || ''} 
+                     onChange={(e) => setEditingStore({...editingStore, importStatus: e.target.value as any})} 
+                     className="w-full p-2 border rounded text-sm bg-white"
+                   >
+                     <option value="">(空)</option>
+                     <option value="是">是</option>
+                     <option value="否">否</option>
+                   </select>
+                   ) : (
+                     <div className="w-full p-2 bg-gray-50 border border-gray-200 rounded text-sm text-gray-600">{editingStore.importStatus || '(空)'}</div>
+                   )}
+                </div>
                <div><button onClick={handleSaveEdit} className="w-full bg-blue-600 text-white py-2 rounded-lg mt-2 font-bold shadow-lg shadow-blue-200">保存修改</button></div>
              </div>
            </div>
@@ -1251,12 +1424,12 @@ export default function App() {
         <div className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
           <div className="bg-white w-full sm:max-w-md rounded-t-xl sm:rounded-xl shadow-2xl flex flex-col max-h-[80vh]">
             <div className="p-4 border-b border-gray-200 flex justify-between items-center bg-gray-50 rounded-t-xl">
-              <div><h3 className="font-bold text-lg text-gray-900">选择要安排的门店</h3><p className="text-xs text-gray-500">{selectedDateForVisit ? `已选: ${selectedDateForVisit}` : '默认: 今天'}</p></div>
+              <div><h3 className="font-bold text-lg text-gray-900">选择要安排的门店</h3><p className="text-xs text-gray-500">{selectedDateForVisit ? `已选: ${selectedDateForVisit}` : '默认: 今天'} (仅显示未导入)</p></div>
               <button onClick={() => setShowAddModal(false)} className="bg-gray-200 p-1 rounded-full"><X size={20}/></button>
             </div>
             
             <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-gray-50 pb-20">
-              {unscheduledStores.length === 0 ? <div className="text-center py-8 text-gray-400">所有任务已安排！</div> : unscheduledStores.map(store => {
+              {unscheduledStores.length === 0 ? <div className="text-center py-8 text-gray-400">所有未导入门店任务已安排！</div> : unscheduledStores.map(store => {
                   const isSelected = selectedStoreIds.includes(store.id);
                   return (
                     <div 

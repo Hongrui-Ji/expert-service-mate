@@ -98,6 +98,7 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 - `assigned_expert`: TEXT (关联 User Name)
 - `monthly_frequency`: INTEGER
 - `special_requirements`: TEXT
+- `import_status`: TEXT (导入状态: 是/否/空)
 
 ### Visits (排班表)
 - `id`: TEXT PRIMARY KEY
@@ -112,7 +113,26 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 - `action`: TEXT
 - `target_user_id`: INTEGER
 
-## 7. 接口定义 (REST API)
+## 7. 接口定义 (REST API) & 权限控制 (RBAC)
+
+### 权限矩阵
+| 功能模块 | 操作 | 路径 | 管理员 (Admin) | 普通用户 (User) |
+| :--- | :--- | :--- | :--- | :--- |
+| **认证** | 登录 | POST `/api/auth/login` | ✅ | ✅ |
+| **账号管理** | 查看列表 | GET `/api/admin/users` | ✅ | ⛔ 403 |
+| | 创建账号 | POST `/api/admin/users` | ✅ | ⛔ 403 |
+| | 更新账号 | PUT `/api/admin/users/:id` | ✅ | ⛔ 403 |
+| **门店管理** | 查看列表 | GET `/api/stores` | ✅ | ✅ |
+| | 单个更新 | PUT `/api/stores/:id` | ✅ (所有字段) | ⚠️ (仅限频次/专家/需求) |
+| | 批量导入 | POST `/api/stores/batch` | ✅ | ⛔ 403 |
+| | 删除门店 | DELETE `/api/stores/:id` | ✅ | ⛔ 403 |
+| **排班管理** | 查看排班 | GET `/api/visits` | ✅ | ✅ |
+| | 添加排班 | POST `/api/visits` | ✅ | ✅ |
+| | 删除排班 | DELETE `/api/visits/:id` | ✅ | ✅ |
+
+### 字段级权限 (PUT /api/stores/:id)
+- **管理员**: 可编辑 `name`, `brand`, `city`, `assignedExpert`, `monthlyFrequency`, `specialRequirements`, `importStatus`。
+- **普通用户**: 仅可编辑 `assignedExpert` (负责专家), `monthlyFrequency` (服务频次), `specialRequirements` (特殊需求)。其他字段若提交将被忽略。
 
 ### 认证 (Auth)
 | 接口名 | 方法 | 路径 | 权限 | 说明 |
@@ -130,7 +150,8 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 | 接口名 | 方法 | 路径 | 权限 | 说明 |
 | :--- | :--- | :--- | :--- | :--- |
 | 获取门店 | GET | `/api/stores` | User/Admin | 返回所有门店列表 |
-| 批量更新门店 | POST | `/api/stores/batch` | Admin | 批量插入或更新门店 (7列数据) |
+| 更新门店 | PUT | `/api/stores/:id` | User/Admin | 单个更新门店 (User 仅限部分字段) |
+| 批量更新门店 | POST | `/api/stores/batch` | Admin | 批量插入或更新门店 (8列数据，含导入状态) |
 | 删除门店 | DELETE | `/api/stores/:id` | Admin | 删除门店及其关联排班 |
 | 获取排班 | GET | `/api/visits` | User/Admin | 获取排班记录 |
 | 添加排班 | POST | `/api/visits` | User/Admin | 创建新的访问记录 |

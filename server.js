@@ -79,6 +79,14 @@ db.exec(`
   );
 `);
 
+// 数据库迁移：添加 import_status 字段
+try {
+  db.prepare("ALTER TABLE stores ADD COLUMN import_status TEXT").run();
+  console.log("Migration: Added import_status column to stores table.");
+} catch (e) {
+  // Column likely already exists
+}
+
 // 预制角色与管理员账号
 const initRoles = db.prepare("INSERT OR IGNORE INTO roles (name, description) VALUES (?, ?)");
 initRoles.run('admin', '超级管理员');
@@ -291,7 +299,8 @@ app.get('/api/stores', authenticateToken, (req, res) => {
     city: s.city,
     assignedExpert: s.assigned_expert, 
     specialRequirements: s.special_requirements, 
-    monthlyFrequency: s.monthly_frequency || 1
+    monthlyFrequency: s.monthly_frequency || 1,
+    importStatus: s.import_status
   }));
   res.json(stores);
 });
@@ -299,15 +308,16 @@ app.get('/api/stores', authenticateToken, (req, res) => {
 app.post('/api/stores/batch', authenticateToken, isAdmin, (req, res) => {
   const stores = req.body;
   const insert = db.prepare(`
-    INSERT INTO stores (id, name, brand, city, assigned_expert, monthly_frequency, special_requirements)
-    VALUES (@id, @name, @brand, @city, @assignedExpert, @monthlyFrequency, @specialRequirements)
+    INSERT INTO stores (id, name, brand, city, assigned_expert, monthly_frequency, special_requirements, import_status)
+    VALUES (@id, @name, @brand, @city, @assignedExpert, @monthlyFrequency, @specialRequirements, @importStatus)
     ON CONFLICT(id) DO UPDATE SET
       name=excluded.name, 
       brand=excluded.brand, 
       city=excluded.city,
       assigned_expert=excluded.assigned_expert, 
       monthly_frequency=excluded.monthly_frequency,
-      special_requirements=excluded.special_requirements
+      special_requirements=excluded.special_requirements,
+      import_status=excluded.import_status
   `);
 
   const insertMany = db.transaction((data) => {
@@ -319,12 +329,57 @@ app.post('/api/stores/batch', authenticateToken, isAdmin, (req, res) => {
         city: store.city || '',
         assignedExpert: store.assignedExpert || '',
         monthlyFrequency: store.monthlyFrequency || 1,
-        specialRequirements: store.specialRequirements || ''
+        specialRequirements: store.specialRequirements || '',
+        importStatus: store.importStatus || null
       };
       insert.run(payload);
     }
   });
   try { insertMany(stores); res.json({ success: true, count: stores.length }); } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.put('/api/stores/:id', authenticateToken, (req, res) => {
+  const { id } = req.params;
+  const store = req.body;
+  const role = req.user.role;
+
+  try {
+    const existing = db.prepare('SELECT * FROM stores WHERE id = ?').get(id);
+    if (!existing) return res.status(404).json({ error: '门店不存在' });
+
+    let sql = 'UPDATE stores SET ';
+    const params = [];
+
+    if (role === 'admin') {
+      // 管理员：允许更新所有字段
+      sql += `name=?, brand=?, city=?, assigned_expert=?, monthly_frequency=?, special_requirements=?, import_status=? WHERE id=?`;
+      params.push(
+        store.name !== undefined ? store.name : existing.name,
+        store.brand !== undefined ? store.brand : existing.brand,
+        store.city !== undefined ? store.city : existing.city,
+        store.assignedExpert !== undefined ? store.assignedExpert : existing.assigned_expert,
+        store.monthlyFrequency !== undefined ? store.monthlyFrequency : existing.monthly_frequency,
+        store.specialRequirements !== undefined ? store.specialRequirements : existing.special_requirements,
+        store.importStatus !== undefined ? store.importStatus : existing.import_status,
+        id
+      );
+    } else {
+      // 普通用户：仅允许更新 频次、专家、特殊需求
+      // 字段级权限验证：如果尝试修改其他字段，忽略或报错。这里选择忽略非授权字段，仅更新授权字段。
+      sql += `assigned_expert=?, monthly_frequency=?, special_requirements=? WHERE id=?`;
+      params.push(
+        store.assignedExpert !== undefined ? store.assignedExpert : existing.assigned_expert,
+        store.monthlyFrequency !== undefined ? store.monthlyFrequency : existing.monthly_frequency,
+        store.specialRequirements !== undefined ? store.specialRequirements : existing.special_requirements,
+        id
+      );
+    }
+
+    db.prepare(sql).run(...params);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.delete('/api/stores/:id', authenticateToken, isAdmin, (req, res) => {
