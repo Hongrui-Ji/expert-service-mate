@@ -423,6 +423,25 @@ app.get('/api/experts', authenticateToken, (req, res) => {
 // app.post('/api/experts', ...);
 // app.delete('/api/experts/:name', ...);
 
+// --- 静态资源服务 (部署配置) ---
+
+// 1. 个人空间主页 (Landing Page) -> /workspace
+app.use('/workspace', express.static(path.join(__dirname, 'landing_page')));
+
+// 2. 排班系统 (Service Mate) -> /workspace/schedule
+// 注意：Service Mate 需使用 build 后的 dist 目录
+app.use('/workspace/schedule', express.static(path.join(__dirname, 'service-mate/dist')));
+
+// 3. SPA 回退路由 (确保排班系统刷新后路由正常)
+app.get(/\/workspace\/schedule\/.*/, (req, res) => {
+  res.sendFile(path.join(__dirname, 'service-mate/dist/index.html'));
+});
+
+// 4. 根路径重定向
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'landing_page/home.html'));
+});
+
 app.listen(PORT, () => {
   console.log(`ServicePlan Mate API running on http://localhost:${PORT}`);
 });
