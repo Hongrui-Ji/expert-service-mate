@@ -263,7 +263,11 @@ export default function App() {
       setExperts(dataExperts);
       setVisits(dataVisits);
 
+      // 默认选中第一个专家，不再支持“全部”
       if (!currentUser && dataExperts.length > 0) {
+        setCurrentUser(dataExperts[0]);
+      } else if (currentUser === '全部' && dataExperts.length > 0) {
+        // 如果之前选的是“全部”，强制切回第一个专家
         setCurrentUser(dataExperts[0]);
       }
     } catch (error) {
@@ -311,24 +315,25 @@ export default function App() {
   // 专家管理逻辑已移除，由账号管理统一接管
 
   const myStores = useMemo(() => {
-    if (currentUser === '全部' || !currentUser) return stores;
+    // 强制过滤当前专家，不再支持“全部”
+    if (!currentUser) return [];
     return stores.filter(s => s.assignedExpert === currentUser);
   }, [stores, currentUser]);
 
   const currentMonthVisits = useMemo(() => {
-    return visits.filter(v => (currentUser === '全部' || !currentUser || v.expertName === currentUser));
+    return visits.filter(v => v.expertName === currentUser);
   }, [visits, currentUser]);
 
   const visitsForSelectedDate = useMemo(() => {
     if (!selectedDateForVisit) return [];
-    return visits.filter(v => v.date === selectedDateForVisit && (currentUser === '全部' || !currentUser || v.expertName === currentUser));
+    return visits.filter(v => v.date === selectedDateForVisit && v.expertName === currentUser);
   }, [visits, selectedDateForVisit, currentUser]);
 
   const unscheduledStores = useMemo(() => {
     const year = currentDate.getFullYear();
     const month = currentDate.getMonth() + 1;
     const prefix = `${year}-${String(month).padStart(2, '0')}`;
-    const thisMonthVisits = visits.filter(v => v.date.startsWith(prefix) && (currentUser === '全部' || !currentUser || v.expertName === currentUser));
+    const thisMonthVisits = visits.filter(v => v.date.startsWith(prefix) && v.expertName === currentUser);
 
     return myStores.map(store => {
       const plannedCount = thisMonthVisits.filter(v => v.storeId === store.id).length;
@@ -800,7 +805,7 @@ export default function App() {
               <div className="flex items-center gap-2 bg-gray-100 px-3 py-1.5 rounded-full">
                 <Users size={16} className="text-gray-500"/>
                 <select value={currentUser} onChange={(e) => setCurrentUser(e.target.value)} className="bg-transparent text-sm border-none focus:ring-0 cursor-pointer font-medium text-gray-700">
-                  <option value="全部">全部专家</option>
+                  {/* 已移除“全部专家”选项 */}
                   {sortedExperts.map(exp => <option key={exp} value={exp}>{exp}</option>)}
                 </select>
               </div>
@@ -824,7 +829,7 @@ export default function App() {
              <div className="flex items-center gap-1 bg-gray-100 px-2 py-1 rounded-md">
               <Users size={14} className="text-gray-500"/>
               <select value={currentUser} onChange={(e) => setCurrentUser(e.target.value)} className="bg-transparent text-xs border-none focus:ring-0 w-16 truncate">
-                <option value="全部">全部</option>
+                {/* 已移除“全部”选项 */}
                 {sortedExperts.map(exp => <option key={exp} value={exp}>{exp}</option>)}
               </select>
             </div>
@@ -1045,7 +1050,7 @@ export default function App() {
             <div className="hidden lg:flex lg:w-72 w-full flex-shrink-0 flex-col bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                 <div className="p-4 bg-gray-50 border-b border-gray-200">
                   <h3 className="font-bold text-gray-800 flex items-center justify-between"><span>待安排门店</span><span className="bg-orange-100 text-orange-800 text-xs px-2 py-1 rounded-full">{unscheduledStores.length}</span></h3>
-                  <p className="text-xs text-gray-500 mt-1">{currentUser === '全部' ? '所有未排班' : `${currentUser} 本月剩余任务`}</p>
+                  <p className="text-xs text-gray-500 mt-1">{currentUser} 本月剩余任务</p>
                 </div>
                 <div className="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar">
                   {unscheduledStores.map(store => {

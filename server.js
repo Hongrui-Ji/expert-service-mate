@@ -215,7 +215,7 @@ app.post('/api/admin/users', authenticateToken, isAdmin, async (req, res) => {
 // 4. 编辑/禁用账号
 app.put('/api/admin/users/:id', authenticateToken, isAdmin, async (req, res) => {
   const { id } = req.params;
-  const { name, phone, status, password } = req.body;
+  const { name, phone, status, password, role } = req.body;
 
   try {
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
@@ -237,6 +237,12 @@ app.put('/api/admin/users/:id', authenticateToken, isAdmin, async (req, res) => 
     if (status !== undefined) {
       updateSql += ', status = ?';
       params.push(status);
+    }
+    if (role) {
+      const roleRow = db.prepare('SELECT id FROM roles WHERE name = ?').get(role);
+      if (!roleRow) return res.status(400).json({ error: '无效的角色' });
+      updateSql += ', role_id = ?';
+      params.push(roleRow.id);
     }
     if (password) {
       if (!PASSWORD_REGEX.test(password)) return res.status(400).json({ error: '密码需8位以上，包含大小写字母和数字' });
