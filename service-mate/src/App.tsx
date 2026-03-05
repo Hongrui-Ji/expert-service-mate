@@ -199,6 +199,23 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastMsg[]>([]);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
+  const [dragging, setDragging] = useState<{ kind: 'store' | 'visit'; id: string } | null>(null);
+  const [dragHoverDate, setDragHoverDate] = useState<string | null>(null);
+  const [dropFlashDate, setDropFlashDate] = useState<string | null>(null);
+  const [touchDrag, setTouchDrag] = useState<{
+    visitId: string;
+    label: string;
+    x: number;
+    y: number;
+    originDate: string;
+  } | null>(null);
+  const dragOverLastTsRef = useRef(0);
+  const dropFlashTimerRef = useRef<number | null>(null);
+  const touchLongPressTimerRef = useRef<number | null>(null);
+  const touchStartPointRef = useRef<{ x: number; y: number } | null>(null);
+  const dragHoverDateRef = useRef<string | null>(null);
+  const touchDragRef = useRef<typeof touchDrag>(null);
+  const lastTouchDragEndRef = useRef(0);
   
   // 编辑/导入/筛选状态
   const [csvText, setCsvText] = useState('');
@@ -372,9 +389,64 @@ export default function App() {
     }
   }, [user, fetchAllData, fetchManagedUsers]);
 
+  useEffect(() => {
+    dragHoverDateRef.current = dragHoverDate;
+  }, [dragHoverDate]);
+
+  useEffect(() => {
+    touchDragRef.current = touchDrag;
+  }, [touchDrag]);
+
+  useEffect(() => {
+    return () => {
+      if (dropFlashTimerRef.current) window.clearTimeout(dropFlashTimerRef.current);
+      if (touchLongPressTimerRef.current) window.clearTimeout(touchLongPressTimerRef.current);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!touchDrag) return;
+    let lastMoveTs = 0;
+    const onMove = (ev: TouchEvent) => {
+      if (!touchDragRef.current) return;
+      if (ev.touches.length !== 1) return;
+      const now = Date.now();
+      if (now - lastMoveTs < 16) return;
+      lastMoveTs = now;
+      ev.preventDefault();
+      const t = ev.touches[0];
+      setTouchDrag(prev => prev ? ({ ...prev, x: t.clientX, y: t.clientY }) : prev);
+      const el = document.elementFromPoint(t.clientX, t.clientY) as any;
+      const dropEl = el?.closest?.('[data-drop-date]') as HTMLElement | null;
+      const date = dropEl?.getAttribute('data-drop-date') || null;
+      if (date) setDragHoverDate(date);
+    };
+    const onEnd = () => {
+      const cur = touchDragRef.current;
+      const targetDate = dragHoverDateRef.current;
+      setTouchDrag(null);
+      setDragging(null);
+      setDragHoverDate(null);
+      touchStartPointRef.current = null;
+      if (cur) lastTouchDragEndRef.current = Date.now();
+      if (cur && targetDate && targetDate !== cur.originDate) {
+        updateVisitDate(cur.visitId, targetDate);
+      }
+    };
+    window.addEventListener('touchmove', onMove, { passive: false });
+    window.addEventListener('touchend', onEnd);
+    window.addEventListener('touchcancel', onEnd);
+    return () => {
+      window.removeEventListener('touchmove', onMove as any);
+      window.removeEventListener('touchend', onEnd);
+      window.removeEventListener('touchcancel', onEnd);
+    };
+  }, [touchDrag]);
+
   // --- 逻辑 ---
 
   const handleDayClick = (dateStr: string) => {
+    if (Date.now() - lastTouchDragEndRef.current < 500) return;
     setSelectedDateForVisit(dateStr);
     setShowDetailsModal(true); 
   };
@@ -434,61 +506,126 @@ export default function App() {
     }).filter(s => s.remaining > 0);
   }, [myStores, visits, currentDate, currentUser]);
 
+  // 辅助函数：根据条件筛选门店
+  const getFilteredStores = (
+    baseStores: Store[], 
+    filters: { 
+      importStatus: string, 
+      city: string[], 
+      brand: string[], 
+      expert: string[] 
+    }
+  ) => {
+    return baseStores.filter(store => {
+      const matchImportStatus = 
+        filters.importStatus === '全部' || 
+        (filters.importStatus === '是' ? store.importStatus === '是' : store.importStatus !== '是');
+      
+      const matchCity = filters.city.includes('全部') || filters.city.includes(store.city);
+      const matchBrand = filters.brand.includes('全部') || filters.brand.includes(store.brand);
+      
+      let matchExpert = true;
+      if (filters.expert.includes('全部')) {
+        matchExpert = true;
+      } else {
+        const hasUnassigned = filters.expert.includes('待分配');
+        const hasSpecific = filters.expert.some(e => e !== '待分配' && e !== '全部');
+        
+        if (hasUnassigned && !store.assignedExpert) matchExpert = true;
+        else if (hasSpecific && filters.expert.includes(store.assignedExpert)) matchExpert = true;
+        else matchExpert = false;
+      }
+      
+      return matchImportStatus && matchCity && matchBrand && matchExpert;
+    });
+  };
+
   // [修改] 实现筛选属性的拼音排序和级联联动
   const uniqueCities = useMemo(() => {
-    const cities = Array.from(new Set(stores.map(s => s.city))).filter(c => typeof c === 'string' && c.trim() !== '');
+    // 城市选项：基于 ImportStatus + Brand + Expert
+    const filtered = getFilteredStores(stores, {
+      importStatus: adminFilterImportStatus,
+      city: ['全部'], // 不筛选城市
+      brand: adminFilterBrand,
+      expert: adminFilterExpert
+    });
+    const cities = Array.from(new Set(filtered.map(s => s.city))).filter(c => typeof c === 'string' && c.trim() !== '');
     return ['全部', ...cities.sort((a, b) => a.localeCompare(b, 'zh-CN'))];
-  }, [stores]);
+  }, [stores, adminFilterImportStatus, adminFilterBrand, adminFilterExpert]);
 
   const uniqueBrands = useMemo(() => {
-    let filtered = stores;
-    if (!adminFilterCity.includes('全部')) {
-      filtered = filtered.filter(s => adminFilterCity.includes(s.city));
-    }
+    // 品牌选项：基于 ImportStatus + City + Expert
+    const filtered = getFilteredStores(stores, {
+      importStatus: adminFilterImportStatus,
+      city: adminFilterCity,
+      brand: ['全部'], // 不筛选品牌
+      expert: adminFilterExpert
+    });
     const brands = Array.from(new Set(filtered.map(s => s.brand))).filter(b => typeof b === 'string' && b.trim() !== '');
     return ['全部', ...brands.sort((a, b) => a.localeCompare(b, 'zh-CN'))];
-  }, [stores, adminFilterCity]);
+  }, [stores, adminFilterImportStatus, adminFilterCity, adminFilterExpert]);
 
   const sortedExperts = useMemo(() => {
     // 过滤非字符串数据，防止 localeCompare 报错
     return experts.filter(e => typeof e === 'string').sort((a, b) => a.localeCompare(b, 'zh-CN'));
   }, [experts]);
 
-  // [新增] 当联动筛选导致当前选中项无效时，自动重置
+  const filterOptionsExperts = useMemo(() => {
+    // 专家选项：基于 ImportStatus + City + Brand
+    const filtered = getFilteredStores(stores, {
+      importStatus: adminFilterImportStatus,
+      city: adminFilterCity,
+      brand: adminFilterBrand,
+      expert: ['全部'] // 不筛选专家
+    });
+    
+    // 提取所有涉及的专家
+    const expertsInView = new Set<string>();
+    filtered.forEach(s => {
+      if (s.assignedExpert) expertsInView.add(s.assignedExpert);
+    });
+    
+    // 过滤 sortedExperts (所有专家列表) 中存在于当前视图的专家
+    // 另外，如果 filtered 中包含未分配的门店，是否要显示“待分配”？通常是的。
+    const hasUnassigned = filtered.some(s => !s.assignedExpert);
+    
+    const validExperts = sortedExperts.filter(e => expertsInView.has(e));
+    
+    const options = ['全部'];
+    if (hasUnassigned) options.push('待分配');
+    return [...options, ...validExperts];
+  }, [stores, adminFilterImportStatus, adminFilterCity, adminFilterBrand, sortedExperts]);
+
+  // [修改] 当联动筛选导致当前选中项无效时，自动重置
   useEffect(() => {
+    // 重置城市
     if (!adminFilterCity.includes('全部')) {
-        // 简单逻辑：如果筛选城市变了，品牌可能不再有效，重置品牌
-        // 更复杂的逻辑是检查当前选中的品牌是否还在 uniqueBrands 中
-        const validBrands = uniqueBrands;
-        const isValid = adminFilterBrand.every(b => validBrands.includes(b));
-        if (!isValid) setAdminFilterBrand(['全部']);
+      const isValid = adminFilterCity.every(c => uniqueCities.includes(c));
+      if (!isValid) setAdminFilterCity(['全部']);
     }
-  }, [uniqueBrands, adminFilterCity, adminFilterBrand]);
+    // 重置品牌
+    if (!adminFilterBrand.includes('全部')) {
+      const isValid = adminFilterBrand.every(b => uniqueBrands.includes(b));
+      if (!isValid) setAdminFilterBrand(['全部']);
+    }
+    // 重置专家
+    if (!adminFilterExpert.includes('全部')) {
+      // filterOptionsExperts 包含 '全部', '待分配', 和专家名
+      const isValid = adminFilterExpert.every(e => filterOptionsExperts.includes(e));
+      if (!isValid) setAdminFilterExpert(['全部']);
+    }
+  }, [uniqueCities, uniqueBrands, filterOptionsExperts, adminFilterCity, adminFilterBrand, adminFilterExpert]);
 
   const filteredStores = useMemo(() => {
-    return stores.filter(store => {
-      const matchCity = adminFilterCity.includes('全部') || adminFilterCity.includes(store.city);
-      const matchBrand = adminFilterBrand.includes('全部') || adminFilterBrand.includes(store.brand);
-      
-      let matchExpert = true;
-      if (adminFilterExpert.includes('全部')) {
-        matchExpert = true;
-      } else {
-        const hasUnassigned = adminFilterExpert.includes('待分配');
-        const hasSpecific = adminFilterExpert.some(e => e !== '待分配' && e !== '全部');
-        
-        if (hasUnassigned && !store.assignedExpert) matchExpert = true;
-        else if (hasSpecific && adminFilterExpert.includes(store.assignedExpert)) matchExpert = true;
-        else matchExpert = false;
-      }
-      
-      const matchImportStatus = 
-        adminFilterImportStatus === '全部' || 
-        (adminFilterImportStatus === '是' ? store.importStatus === '是' : store.importStatus !== '是');
-
+    return getFilteredStores(stores, {
+      importStatus: adminFilterImportStatus,
+      city: adminFilterCity,
+      brand: adminFilterBrand,
+      expert: adminFilterExpert
+    }).filter(store => {
       const searchLower = adminSearchTerm.toLowerCase();
       const matchSearch = store.name.toLowerCase().includes(searchLower) || store.id.toLowerCase().includes(searchLower);
-      return matchCity && matchBrand && matchExpert && matchImportStatus && matchSearch;
+      return matchSearch;
     });
   }, [stores, adminFilterCity, adminFilterBrand, adminFilterExpert, adminFilterImportStatus, adminSearchTerm]);
 
@@ -541,6 +678,164 @@ export default function App() {
         showToast('排班已取消', 'info');
       }
     } catch (e) { console.error(e); }
+  };
+
+  const flashDrop = (dateStr: string) => {
+    setDropFlashDate(dateStr);
+    if (dropFlashTimerRef.current) window.clearTimeout(dropFlashTimerRef.current);
+    dropFlashTimerRef.current = window.setTimeout(() => setDropFlashDate(null), 450);
+  };
+
+  const hasScheduleConflict = (storeId: string, dateStr: string, ignoreVisitId?: string) => {
+    return visits.some(v => v.storeId === storeId && v.date === dateStr && v.expertName === currentUser && v.id !== ignoreVisitId);
+  };
+
+  const createVisitForStoreOnDate = async (storeId: string, dateStr: string) => {
+    if (!currentUser) return;
+    if (hasScheduleConflict(storeId, dateStr)) {
+      showToast('该日期已安排过该门店', 'error');
+      return;
+    }
+    const newVisit: Visit = {
+      id: crypto.randomUUID(),
+      storeId,
+      date: dateStr,
+      expertName: currentUser,
+      status: 'planned'
+    };
+    setVisits(prev => [...prev, newVisit]);
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/visits`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newVisit)
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'API Error');
+      }
+      flashDrop(dateStr);
+      showToast('已添加排班', 'success');
+    } catch (err: any) {
+      setVisits(prev => prev.filter(v => v.id !== newVisit.id));
+      showToast(`拖拽失败：${err.message || '网络错误'}`, 'error');
+    }
+  };
+
+  const updateVisitDate = async (visitId: string, targetDate: string) => {
+    const existing = visits.find(v => v.id === visitId);
+    if (!existing) return;
+    if (existing.date === targetDate) return;
+    if (hasScheduleConflict(existing.storeId, targetDate, visitId)) {
+      showToast('目标日期已存在相同门店安排', 'error');
+      return;
+    }
+    setVisits(prev => prev.map(v => v.id === visitId ? { ...v, date: targetDate } : v));
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/visits/${visitId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: targetDate })
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'API Error');
+      }
+      flashDrop(targetDate);
+      showToast('已更新日期', 'success');
+    } catch (err: any) {
+      setVisits(prev => prev.map(v => v.id === visitId ? existing : v));
+      showToast(`拖拽失败：${err.message || '网络错误'}`, 'error');
+    }
+  };
+
+  const handleDragEnd = () => {
+    setDragging(null);
+    setDragHoverDate(null);
+  };
+
+  const beginStoreDrag = (storeId: string) => (e: React.DragEvent) => {
+    setDragging({ kind: 'store', id: storeId });
+    e.dataTransfer.effectAllowed = 'move';
+    const payload = JSON.stringify({ kind: 'store', id: storeId });
+    e.dataTransfer.setData('application/json', payload);
+    e.dataTransfer.setData('text/plain', payload);
+  };
+
+  const beginVisitDrag = (visitId: string) => (e: React.DragEvent) => {
+    setDragging({ kind: 'visit', id: visitId });
+    e.dataTransfer.effectAllowed = 'move';
+    const payload = JSON.stringify({ kind: 'visit', id: visitId });
+    e.dataTransfer.setData('application/json', payload);
+    e.dataTransfer.setData('text/plain', payload);
+  };
+
+  const handleCalendarDragOver = (dateStr: string) => (e: React.DragEvent) => {
+    if (!dragging) return;
+    e.preventDefault();
+    const now = Date.now();
+    if (now - dragOverLastTsRef.current < 60) return;
+    dragOverLastTsRef.current = now;
+    setDragHoverDate(dateStr);
+  };
+
+  const handleCalendarDragLeave = (dateStr: string) => () => {
+    if (dragHoverDateRef.current === dateStr) setDragHoverDate(null);
+  };
+
+  const handleCalendarDrop = (dateStr: string) => async (e: React.DragEvent) => {
+    if (!dragging) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setDragHoverDate(null);
+    const raw = e.dataTransfer.getData('application/json') || e.dataTransfer.getData('text/plain') || '';
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed?.kind === 'store') {
+        await createVisitForStoreOnDate(parsed.id, dateStr);
+      } else if (parsed?.kind === 'visit') {
+        await updateVisitDate(parsed.id, dateStr);
+      }
+    } catch (err) {
+      showToast('拖拽数据解析失败', 'error');
+    } finally {
+      handleDragEnd();
+    }
+  };
+
+  const beginMobileVisitLongPress = (visitId: string, label: string, originDate: string) => (e: React.TouchEvent) => {
+    if (viewMode !== 'week') return;
+    if (e.touches.length !== 1) return;
+    const t = e.touches[0];
+    touchStartPointRef.current = { x: t.clientX, y: t.clientY };
+    if (touchLongPressTimerRef.current) window.clearTimeout(touchLongPressTimerRef.current);
+    touchLongPressTimerRef.current = window.setTimeout(() => {
+      const start = touchStartPointRef.current;
+      if (!start) return;
+      setDragging({ kind: 'visit', id: visitId });
+      setTouchDrag({ visitId, label, x: start.x, y: start.y, originDate });
+      setDragHoverDate(originDate);
+    }, 320);
+  };
+
+  const cancelMobileLongPress = (e: React.TouchEvent) => {
+    if (touchLongPressTimerRef.current) {
+      const start = touchStartPointRef.current;
+      const t = e.touches[0];
+      if (start && t) {
+        const dx = t.clientX - start.x;
+        const dy = t.clientY - start.y;
+        if (Math.hypot(dx, dy) > 10) {
+          window.clearTimeout(touchLongPressTimerRef.current);
+          touchLongPressTimerRef.current = null;
+        }
+      }
+    }
+  };
+
+  const cancelMobileLongPressEnd = () => {
+    if (touchLongPressTimerRef.current) window.clearTimeout(touchLongPressTimerRef.current);
+    touchLongPressTimerRef.current = null;
   };
 
   const handleImport = async () => {
@@ -693,13 +988,20 @@ export default function App() {
       const dayVisits = currentMonthVisits.filter(v => v.date === dateStr);
       const hasVisits = dayVisits.length > 0;
       const isSelected = selectedDateForVisit === dateStr;
+      const isDragHover = dragHoverDate === dateStr;
+      const isFlash = dropFlashDate === dateStr;
 
       days.push(
         <div 
           key={dateStr} 
           onClick={() => handleDayClick(dateStr)} 
+          onDragOver={handleCalendarDragOver(dateStr)}
+          onDrop={handleCalendarDrop(dateStr)}
+          onDragLeave={handleCalendarDragLeave(dateStr)}
           className={`min-h-[6rem] p-1 border-r border-b border-gray-200 relative cursor-pointer transition-colors 
             ${isSelected ? 'bg-blue-100 ring-2 ring-inset ring-blue-400' : isToday ? 'bg-blue-50/30' : 'bg-white hover:bg-gray-50'}
+            ${isDragHover ? 'ring-2 ring-blue-400 bg-blue-50' : ''}
+            ${isFlash ? 'animate-pulse bg-green-50 ring-2 ring-green-300' : ''}
           `}
         >
           <div className="flex justify-between items-start">
@@ -711,7 +1013,14 @@ export default function App() {
               const store = stores.find(s => s.id === visit.storeId);
               return (
                 // [修改] 加入原生 tooltip，允许换行显示避免文字被阶段
-                <div key={visit.id} title={`${store?.name} (${store?.brand} · ${store?.city})`} className="whitespace-normal break-words line-clamp-2 leading-tight text-[10px] bg-blue-100 text-blue-900 p-0.5 rounded px-1 mb-0.5">
+                <div
+                  key={visit.id}
+                  draggable
+                  onDragStart={beginVisitDrag(visit.id)}
+                  onDragEnd={handleDragEnd}
+                  title={`${store?.name} (${store?.brand} · ${store?.city})`}
+                  className={`whitespace-normal break-words line-clamp-2 leading-tight text-[10px] bg-blue-100 text-blue-900 p-0.5 rounded px-1 mb-0.5 cursor-grab active:cursor-grabbing transition ${dragging?.kind === 'visit' && dragging.id === visit.id ? 'opacity-50' : ''}`}
+                >
                   {store?.name}
                 </div>
               );
@@ -747,13 +1056,20 @@ export default function App() {
       const isToday = isSameDay(d, new Date());
       const dayVisits = currentMonthVisits.filter(v => v.date === dateStr);
       const isSelected = selectedDateForVisit === dateStr;
+      const isDragHover = dragHoverDate === dateStr;
+      const isFlash = dropFlashDate === dateStr;
 
       weekDays.push(
         <div 
           key={dateStr} 
           onClick={() => handleDayClick(dateStr)}
+          onDragOver={handleCalendarDragOver(dateStr)}
+          onDrop={handleCalendarDrop(dateStr)}
+          onDragLeave={handleCalendarDragLeave(dateStr)}
           className={`flex-1 flex flex-col min-w-[140px] border-r border-gray-200 
             ${isSelected ? 'bg-blue-50 ring-2 ring-inset ring-blue-300' : isToday ? 'bg-blue-50/20' : 'bg-white'}
+            ${isDragHover ? 'ring-2 ring-blue-400 bg-blue-50' : ''}
+            ${isFlash ? 'animate-pulse bg-green-50 ring-2 ring-green-300' : ''}
           `}
         >
           <div className={`p-3 text-center border-b border-gray-100 ${isToday ? 'bg-blue-100/50' : 'bg-gray-50'}`}>
@@ -766,7 +1082,13 @@ export default function App() {
               {dayVisits.map(visit => {
                 const store = stores.find(s => s.id === visit.storeId);
                 return (
-                  <div key={visit.id} className="relative group bg-white border-l-4 border-l-blue-500 shadow-sm border border-gray-200 rounded p-2 hover:shadow-md transition">
+                  <div
+                    key={visit.id}
+                    draggable
+                    onDragStart={beginVisitDrag(visit.id)}
+                    onDragEnd={handleDragEnd}
+                    className={`relative group bg-white border-l-4 border-l-blue-500 shadow-sm border border-gray-200 rounded p-2 hover:shadow-md transition cursor-grab active:cursor-grabbing ${dragging?.kind === 'visit' && dragging.id === visit.id ? 'opacity-50' : ''}`}
+                  >
                     {/* [修改] 移除 truncate，允许店名完整换行显示，并增加原生 tooltip */}
                     <div className="font-bold text-gray-800 text-sm whitespace-normal break-words leading-snug pr-4" title={`${store?.name} (${store?.brand} · ${store?.city})`}>{store?.name}</div>
                     <div className="flex items-center gap-1 text-[10px] text-gray-500 mt-1"><MapPin size={10}/> {store?.city}</div>
@@ -793,9 +1115,16 @@ export default function App() {
       const isToday = isSameDay(d, new Date());
       const dayVisits = currentMonthVisits.filter(v => v.date === dateStr);
       const isSelected = selectedDateForVisit === dateStr;
+      const isDragHover = dragHoverDate === dateStr;
+      const isFlash = dropFlashDate === dateStr;
 
       weekRows.push(
-        <div key={dateStr} onClick={() => handleDayClick(dateStr)} className={`flex flex-col border-b border-gray-100 p-3 cursor-pointer ${isSelected ? 'bg-blue-50' : 'bg-white'}`}>
+        <div
+          key={dateStr}
+          data-drop-date={dateStr}
+          onClick={() => handleDayClick(dateStr)}
+          className={`flex flex-col border-b border-gray-100 p-3 cursor-pointer ${isSelected ? 'bg-blue-50' : 'bg-white'} ${isDragHover ? 'ring-2 ring-inset ring-blue-400 bg-blue-50' : ''} ${isFlash ? 'animate-pulse bg-green-50 ring-2 ring-inset ring-green-300' : ''}`}
+        >
           <div className="flex items-center gap-3 mb-2">
             <span className={`text-xl font-bold w-8 text-center ${isToday ? 'text-blue-600' : 'text-gray-900'}`}>{d.getDate()}</span>
             <div className="flex flex-col">
@@ -809,8 +1138,16 @@ export default function App() {
           <div className="pl-11 space-y-2">
             {dayVisits.length === 0 ? <div className="text-xs text-gray-300 italic">点击添加安排</div> : dayVisits.map(visit => {
                 const store = stores.find(s => s.id === visit.storeId);
+                const label = store?.name || '门店';
                 return (
-                  <div key={visit.id} className="bg-white border border-gray-200 rounded-lg p-3 shadow-sm flex justify-between items-center">
+                  <div
+                    key={visit.id}
+                    onTouchStart={beginMobileVisitLongPress(visit.id, label, dateStr)}
+                    onTouchMove={cancelMobileLongPress}
+                    onTouchEnd={cancelMobileLongPressEnd}
+                    onTouchCancel={cancelMobileLongPressEnd}
+                    className={`bg-white border border-gray-200 rounded-lg p-3 shadow-sm flex justify-between items-center transition ${touchDrag?.visitId === visit.id ? 'opacity-50' : ''}`}
+                  >
                     <div>
                       <div className="font-bold text-gray-800 text-sm whitespace-normal break-words leading-snug">{store?.name}</div>
                       <div className="text-xs text-gray-500 mt-1">{store?.brand} · {store?.city}</div>
@@ -902,6 +1239,13 @@ export default function App() {
           </div>
         ))}
       </div>
+      {touchDrag && (
+        <div className="fixed z-[80] pointer-events-none" style={{ left: touchDrag.x, top: touchDrag.y, transform: 'translate(-50%, -50%)' }}>
+          <div className="bg-blue-600 text-white text-sm px-3 py-2 rounded-lg shadow-lg opacity-90 max-w-[70vw] whitespace-normal break-words">
+            {touchDrag.label}
+          </div>
+        </div>
+      )}
 
       <nav className="bg-white border-b border-gray-200 px-4 py-3 sticky top-0 z-20 shadow-sm">
         <div className="max-w-7xl mx-auto flex justify-between items-center">
@@ -1097,7 +1441,7 @@ export default function App() {
 
                     <MultiSelect
                       label="专家"
-                      options={['全部', '待分配', ...sortedExperts]}
+                      options={filterOptionsExperts}
                       value={adminFilterExpert}
                       onChange={setAdminFilterExpert}
                     />
@@ -1198,8 +1542,12 @@ export default function App() {
                       <div 
                         key={store.id} 
                         onClick={() => toggleStoreSelection(store.id)} 
+                        draggable
+                        onDragStart={beginStoreDrag(store.id)}
+                        onDragEnd={handleDragEnd}
                         className={`bg-white p-3 rounded-lg border shadow-sm cursor-pointer transition select-none
                           ${isSelected ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-500' : 'border-gray-200 hover:border-blue-300'}
+                          ${dragging?.kind === 'store' && dragging.id === store.id ? 'opacity-50' : ''}
                         `}
                       >
                         <div className="flex justify-between items-start mb-1">

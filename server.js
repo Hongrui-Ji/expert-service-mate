@@ -408,6 +408,25 @@ app.post('/api/visits', authenticateToken, (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+app.put('/api/visits/:id', authenticateToken, (req, res) => {
+  const { id } = req.params;
+  const { date, status } = req.body || {};
+  if (!date && !status) return res.status(400).json({ error: 'Missing date or status' });
+  try {
+    const existing = db.prepare('SELECT * FROM visits WHERE id = ?').get(id);
+    if (!existing) return res.status(404).json({ error: '排班不存在' });
+    if (req.user.role !== 'admin' && existing.expert_name !== req.user.name) {
+      return res.status(403).json({ error: 'Permission denied' });
+    }
+    const newDate = date || existing.date;
+    const newStatus = status || existing.status;
+    db.prepare('UPDATE visits SET date = ?, status = ? WHERE id = ?').run(newDate, newStatus, id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.delete('/api/visits/:id', authenticateToken, (req, res) => {
   db.prepare('DELETE FROM visits WHERE id = ?').run(req.params.id);
   res.json({ success: true });
