@@ -59,6 +59,7 @@ db.exec(`
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     brand TEXT,
+    province TEXT,
     city TEXT,
     assigned_expert TEXT,
     monthly_frequency INTEGER DEFAULT 1,
@@ -83,6 +84,13 @@ db.exec(`
 try {
   db.prepare("ALTER TABLE stores ADD COLUMN import_status TEXT").run();
   console.log("Migration: Added import_status column to stores table.");
+} catch (e) {
+  // Column likely already exists
+}
+
+try {
+  db.prepare("ALTER TABLE stores ADD COLUMN province TEXT").run();
+  console.log("Migration: Added province column to stores table.");
 } catch (e) {
   // Column likely already exists
 }
@@ -296,6 +304,7 @@ app.get('/api/stores', authenticateToken, (req, res) => {
     id: s.id, 
     name: s.name, 
     brand: s.brand, 
+    province: s.province || '',
     city: s.city,
     assignedExpert: s.assigned_expert, 
     specialRequirements: s.special_requirements, 
@@ -308,11 +317,12 @@ app.get('/api/stores', authenticateToken, (req, res) => {
 app.post('/api/stores/batch', authenticateToken, isAdmin, (req, res) => {
   const stores = req.body;
   const insert = db.prepare(`
-    INSERT INTO stores (id, name, brand, city, assigned_expert, monthly_frequency, special_requirements, import_status)
-    VALUES (@id, @name, @brand, @city, @assignedExpert, @monthlyFrequency, @specialRequirements, @importStatus)
+    INSERT INTO stores (id, name, brand, province, city, assigned_expert, monthly_frequency, special_requirements, import_status)
+    VALUES (@id, @name, @brand, @province, @city, @assignedExpert, @monthlyFrequency, @specialRequirements, @importStatus)
     ON CONFLICT(id) DO UPDATE SET
       name=excluded.name, 
-      brand=excluded.brand, 
+      brand=excluded.brand,
+      province=excluded.province,
       city=excluded.city,
       assigned_expert=excluded.assigned_expert, 
       monthly_frequency=excluded.monthly_frequency,
@@ -326,6 +336,7 @@ app.post('/api/stores/batch', authenticateToken, isAdmin, (req, res) => {
         id: store.id,
         name: store.name,
         brand: store.brand || '',
+        province: store.province || '',
         city: store.city || '',
         assignedExpert: store.assignedExpert || '',
         monthlyFrequency: store.monthlyFrequency || 1,
@@ -352,10 +363,11 @@ app.put('/api/stores/:id', authenticateToken, (req, res) => {
 
     if (role === 'admin') {
       // 管理员：允许更新所有字段
-      sql += `name=?, brand=?, city=?, assigned_expert=?, monthly_frequency=?, special_requirements=?, import_status=? WHERE id=?`;
+      sql += `name=?, brand=?, province=?, city=?, assigned_expert=?, monthly_frequency=?, special_requirements=?, import_status=? WHERE id=?`;
       params.push(
         store.name !== undefined ? store.name : existing.name,
         store.brand !== undefined ? store.brand : existing.brand,
+        store.province !== undefined ? store.province : existing.province,
         store.city !== undefined ? store.city : existing.city,
         store.assignedExpert !== undefined ? store.assignedExpert : existing.assigned_expert,
         store.monthlyFrequency !== undefined ? store.monthlyFrequency : existing.monthly_frequency,

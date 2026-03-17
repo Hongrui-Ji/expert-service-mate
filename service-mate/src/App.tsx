@@ -61,6 +61,7 @@ interface Store {
   id: string;
   name: string;
   brand: string;
+  province: string;
   city: string;
   assignedExpert: string; 
   specialRequirements?: string;
@@ -223,6 +224,7 @@ export default function App() {
   // const [newExpertName, setNewExpertName] = useState(''); // 已移除
   const [adminFilterCity, setAdminFilterCity] = useState<string[]>(['全部']);
   const [adminFilterBrand, setAdminFilterBrand] = useState<string[]>(['全部']);
+  const [adminFilterProvince, setAdminFilterProvince] = useState<string[]>(['全部']);
   const [adminFilterExpert, setAdminFilterExpert] = useState<string[]>(['全部']);
   const [adminFilterImportStatus, setAdminFilterImportStatus] = useState('否'); // 默认显示未导入门店
   const [adminSearchTerm, setAdminSearchTerm] = useState('');
@@ -511,6 +513,7 @@ export default function App() {
     baseStores: Store[], 
     filters: { 
       importStatus: string, 
+      province: string[],
       city: string[], 
       brand: string[], 
       expert: string[] 
@@ -521,6 +524,7 @@ export default function App() {
         filters.importStatus === '全部' || 
         (filters.importStatus === '是' ? store.importStatus === '是' : store.importStatus !== '是');
       
+      const matchProvince = filters.province.includes('全部') || filters.province.includes(store.province);
       const matchCity = filters.city.includes('全部') || filters.city.includes(store.city);
       const matchBrand = filters.brand.includes('全部') || filters.brand.includes(store.brand);
       
@@ -536,34 +540,46 @@ export default function App() {
         else matchExpert = false;
       }
       
-      return matchImportStatus && matchCity && matchBrand && matchExpert;
+      return matchImportStatus && matchProvince && matchCity && matchBrand && matchExpert;
     });
   };
 
   // [修改] 实现筛选属性的拼音排序和级联联动
-  const uniqueCities = useMemo(() => {
-    // 城市选项：基于 ImportStatus + Brand + Expert
+  const uniqueProvinces = useMemo(() => {
     const filtered = getFilteredStores(stores, {
       importStatus: adminFilterImportStatus,
-      city: ['全部'], // 不筛选城市
+      province: ['全部'],
+      city: adminFilterCity,
+      brand: adminFilterBrand,
+      expert: adminFilterExpert
+    });
+    const provinces = Array.from(new Set(filtered.map(s => s.province))).filter(p => typeof p === 'string' && p.trim() !== '');
+    return ['全部', ...provinces.sort((a, b) => a.localeCompare(b, 'zh-CN'))];
+  }, [stores, adminFilterImportStatus, adminFilterCity, adminFilterBrand, adminFilterExpert]);
+
+  const uniqueCities = useMemo(() => {
+    const filtered = getFilteredStores(stores, {
+      importStatus: adminFilterImportStatus,
+      province: adminFilterProvince,
+      city: ['全部'],
       brand: adminFilterBrand,
       expert: adminFilterExpert
     });
     const cities = Array.from(new Set(filtered.map(s => s.city))).filter(c => typeof c === 'string' && c.trim() !== '');
     return ['全部', ...cities.sort((a, b) => a.localeCompare(b, 'zh-CN'))];
-  }, [stores, adminFilterImportStatus, adminFilterBrand, adminFilterExpert]);
+  }, [stores, adminFilterImportStatus, adminFilterProvince, adminFilterBrand, adminFilterExpert]);
 
   const uniqueBrands = useMemo(() => {
-    // 品牌选项：基于 ImportStatus + City + Expert
     const filtered = getFilteredStores(stores, {
       importStatus: adminFilterImportStatus,
+      province: adminFilterProvince,
       city: adminFilterCity,
-      brand: ['全部'], // 不筛选品牌
+      brand: ['全部'],
       expert: adminFilterExpert
     });
     const brands = Array.from(new Set(filtered.map(s => s.brand))).filter(b => typeof b === 'string' && b.trim() !== '');
     return ['全部', ...brands.sort((a, b) => a.localeCompare(b, 'zh-CN'))];
-  }, [stores, adminFilterImportStatus, adminFilterCity, adminFilterExpert]);
+  }, [stores, adminFilterImportStatus, adminFilterProvince, adminFilterCity, adminFilterExpert]);
 
   const sortedExperts = useMemo(() => {
     // 过滤非字符串数据，防止 localeCompare 报错
@@ -571,12 +587,12 @@ export default function App() {
   }, [experts]);
 
   const filterOptionsExperts = useMemo(() => {
-    // 专家选项：基于 ImportStatus + City + Brand
     const filtered = getFilteredStores(stores, {
       importStatus: adminFilterImportStatus,
+      province: adminFilterProvince,
       city: adminFilterCity,
       brand: adminFilterBrand,
-      expert: ['全部'] // 不筛选专家
+      expert: ['全部']
     });
     
     // 提取所有涉及的专家
@@ -594,10 +610,14 @@ export default function App() {
     const options = ['全部'];
     if (hasUnassigned) options.push('待分配');
     return [...options, ...validExperts];
-  }, [stores, adminFilterImportStatus, adminFilterCity, adminFilterBrand, sortedExperts]);
+  }, [stores, adminFilterImportStatus, adminFilterProvince, adminFilterCity, adminFilterBrand, sortedExperts]);
 
   // [修改] 当联动筛选导致当前选中项无效时，自动重置
   useEffect(() => {
+    if (!adminFilterProvince.includes('全部')) {
+      const isValid = adminFilterProvince.every(p => uniqueProvinces.includes(p));
+      if (!isValid) setAdminFilterProvince(['全部']);
+    }
     // 重置城市
     if (!adminFilterCity.includes('全部')) {
       const isValid = adminFilterCity.every(c => uniqueCities.includes(c));
@@ -614,11 +634,12 @@ export default function App() {
       const isValid = adminFilterExpert.every(e => filterOptionsExperts.includes(e));
       if (!isValid) setAdminFilterExpert(['全部']);
     }
-  }, [uniqueCities, uniqueBrands, filterOptionsExperts, adminFilterCity, adminFilterBrand, adminFilterExpert]);
+  }, [uniqueProvinces, uniqueCities, uniqueBrands, filterOptionsExperts, adminFilterProvince, adminFilterCity, adminFilterBrand, adminFilterExpert]);
 
   const filteredStores = useMemo(() => {
     return getFilteredStores(stores, {
       importStatus: adminFilterImportStatus,
+      province: adminFilterProvince,
       city: adminFilterCity,
       brand: adminFilterBrand,
       expert: adminFilterExpert
@@ -627,7 +648,7 @@ export default function App() {
       const matchSearch = store.name.toLowerCase().includes(searchLower) || store.id.toLowerCase().includes(searchLower);
       return matchSearch;
     });
-  }, [stores, adminFilterCity, adminFilterBrand, adminFilterExpert, adminFilterImportStatus, adminSearchTerm]);
+  }, [stores, adminFilterProvince, adminFilterCity, adminFilterBrand, adminFilterExpert, adminFilterImportStatus, adminSearchTerm]);
 
   // 批量/单选 门店
   const toggleStoreSelection = (storeId: string) => {
@@ -863,13 +884,30 @@ export default function App() {
           continue;
         } 
         
-        // 严格按照 8 列顺序：1. ID, 2. 名称, 3. 品牌, 4. 城市, 5. 专家, 6. 频次, 7. 需求, 8. 导入状态
         const id = cols[0];
         const name = cols[1];
         const brand = cols[2];
-        // const province = cols[3]; // 已移除
-        const city = cols[3];
-        const assignedExpert = cols[4] || '';
+        let province = '';
+        let city = '';
+        let assignedExpert = '';
+        let frequencyIdx = 0;
+        let requirementsIdx = 0;
+        let importStatusIdx = 0;
+        
+        if (cols.length >= 9) {
+          province = cols[3] || '';
+          city = cols[4] || '';
+          assignedExpert = cols[5] || '';
+          frequencyIdx = 6;
+          requirementsIdx = 7;
+          importStatusIdx = 8;
+        } else {
+          city = cols[3] || '';
+          assignedExpert = cols[4] || '';
+          frequencyIdx = 5;
+          requirementsIdx = 6;
+          importStatusIdx = 7;
+        }
         
         if (!id || !name || !city) {
           console.warn(`跳过无效行 ${i + 1}: ID, 名称, 城市 不能为空`, cols);
@@ -877,16 +915,16 @@ export default function App() {
         }
 
         let frequency = 1;
-        if (cols[5]) {
-          const parsed = parseInt(cols[5]);
+        if (cols[frequencyIdx]) {
+          const parsed = parseInt(cols[frequencyIdx]);
           if (!isNaN(parsed) && parsed > 0) frequency = parsed;
         }
         
-        const specialRequirements = cols[6] || '';
-        const importStatus = cols[7] || ''; // 新增字段解析
+        const specialRequirements = cols[requirementsIdx] || '';
+        const importStatus = cols[importStatusIdx] || '';
 
         newStores.push({
-          id, name, brand, city,
+          id, name, brand, province, city,
           assignedExpert, specialRequirements, monthlyFrequency: frequency,
           importStatus
         });
@@ -909,12 +947,13 @@ export default function App() {
   };
 
   const handleExport = () => {
-    let csvContent = "\ufeff门店ID,门店名称,品牌,城市,负责专家,服务频次,特殊需求,导入状态\n";
+    let csvContent = "\ufeff门店ID,门店名称,品牌,省份,城市,负责专家,服务频次,特殊需求,导入状态\n";
     stores.forEach(store => {
       const row = [
         store.id, 
         store.name, 
         store.brand || '', 
+        store.province || '',
         store.city || '', 
         store.assignedExpert || '', 
         store.monthlyFrequency, 
@@ -1376,10 +1415,10 @@ export default function App() {
                     <p className="font-bold mb-1">导入格式说明 (支持 Excel 直接粘贴)</p>
                     <p className="text-xs opacity-90 leading-relaxed">
                       请严格按照以下顺序排列列：<br/>
-                      1. 门店ID | 2. 门店名称 | 3. 品牌 | 4. 城市 | 5. 负责专家 | 6. 频次 | 7. 特殊需求 | 8. 导入状态(是/否)
+                      1. 门店ID | 2. 门店名称 | 3. 品牌 | 4. 省份 | 5. 城市 | 6. 负责专家 | 7. 频次 | 8. 特殊需求 | 9. 导入状态(是/否)
                     </p>
                   </div>
-                  <textarea value={csvText} onChange={(e) => setCsvText(e.target.value)} placeholder="在此处粘贴 Excel 数据 (ID, 名称, 品牌, 城市, 专家, 频次, 需求, 导入状态)..." className="w-full h-24 p-3 border border-gray-300 rounded-lg text-sm font-mono outline-none"/>
+                  <textarea value={csvText} onChange={(e) => setCsvText(e.target.value)} placeholder="在此处粘贴 Excel 数据 (ID, 名称, 品牌, 省份, 城市, 专家, 频次, 需求, 导入状态)..." className="w-full h-24 p-3 border border-gray-300 rounded-lg text-sm font-mono outline-none"/>
                   <button onClick={handleImport} className="bg-blue-600 text-white px-6 py-2 rounded-lg text-sm font-medium hover:bg-blue-700">确认导入 / 更新</button>
                 </div>
             </div>
@@ -1390,9 +1429,10 @@ export default function App() {
                 <div className="flex justify-between items-center">
                   <h3 className="font-bold text-gray-700">门店库 ({filteredStores.length})</h3>
                   <div className="flex items-center gap-2">
-                    {(!adminFilterCity.includes('全部') || !adminFilterBrand.includes('全部') || !adminFilterExpert.includes('全部') || adminFilterImportStatus !== '否' || adminSearchTerm) && (
+                    {(!adminFilterProvince.includes('全部') || !adminFilterCity.includes('全部') || !adminFilterBrand.includes('全部') || !adminFilterExpert.includes('全部') || adminFilterImportStatus !== '否' || adminSearchTerm) && (
                       <button 
                         onClick={() => {
+                          setAdminFilterProvince(['全部']);
                           setAdminFilterCity(['全部']);
                           setAdminFilterBrand(['全部']);
                           setAdminFilterExpert(['全部']);
@@ -1426,6 +1466,13 @@ export default function App() {
                     </div>
 
                     <MultiSelect
+                      label="省份"
+                      options={uniqueProvinces}
+                      value={adminFilterProvince}
+                      onChange={setAdminFilterProvince}
+                    />
+
+                    <MultiSelect
                       label="城市"
                       options={uniqueCities}
                       value={adminFilterCity}
@@ -1456,6 +1503,7 @@ export default function App() {
                       <th className="px-4 py-3">门店ID</th>
                       <th className="px-4 py-3">门店名称</th>
                       <th className="px-4 py-3">品牌</th>
+                      <th className="px-4 py-3">省份</th>
                       <th className="px-4 py-3">城市</th>
                       <th className="px-4 py-3 text-center">频次</th>
                       <th className="px-4 py-3">负责专家</th>
@@ -1469,6 +1517,7 @@ export default function App() {
                       <td className="px-4 py-4 font-mono text-xs text-gray-500">{store.id}</td>
                       <td className="px-4 py-4 font-medium">{store.name}</td>
                       <td className="px-4 py-4"><span className="bg-gray-100 px-2 py-1 rounded text-[10px] font-bold">{store.brand}</span></td>
+                      <td className="px-4 py-4 text-gray-600">{store.province || '-'}</td>
                       <td className="px-4 py-4 text-gray-600">{store.city}</td>
                       <td className="px-4 py-4 text-center font-medium text-blue-600">{store.monthlyFrequency}次/月</td>
                       <td className="px-4 py-4 font-medium">{store.assignedExpert || <span className="text-red-500 text-xs italic">待分配</span>}</td>
@@ -1505,6 +1554,7 @@ export default function App() {
                     </div>
                     <div className="grid grid-cols-2 gap-2 text-sm text-gray-600 mb-3">
                       <div className="flex items-center gap-1"><Briefcase size={14}/> {store.brand}</div>
+                      <div className="flex items-center gap-1"><MapPin size={14}/> {store.province || '-'}</div>
                       <div className="flex items-center gap-1"><MapPin size={14}/> {store.city}</div>
                       <div className="flex items-center gap-1"><Clock size={14}/> {store.monthlyFrequency}次/月</div>
                       <div className="flex items-center gap-1"><Tag size={14}/> {store.specialRequirements || '无'}</div>
@@ -1639,6 +1689,14 @@ export default function App() {
                  </div>
                </div>
                <div className="grid grid-cols-2 gap-4">
+                 <div>
+                   <label className="block text-sm font-medium text-gray-700 mb-1">省份</label>
+                   {user.role === 'admin' ? (
+                     <input type="text" value={editingStore.province} onChange={(e) => setEditingStore({...editingStore, province: e.target.value})} className="w-full p-2 border rounded text-sm"/>
+                   ) : (
+                     <div className="w-full p-2 bg-gray-50 border border-gray-200 rounded text-sm text-gray-600">{editingStore.province || '-'}</div>
+                   )}
+                 </div>
                  <div>
                     <label className="block text-sm font-medium text-gray-700 mb-1">城市</label>
                     {user.role === 'admin' ? (
