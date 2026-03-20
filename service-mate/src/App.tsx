@@ -170,7 +170,7 @@ export default function App() {
   // 状态管理
   const [activeTab, setActiveTab] = useState<'calendar' | 'admin'>('calendar');
   const [currentUser, setCurrentUser] = useState<string>(''); 
-  const [viewMode, setViewMode] = useState<'month' | 'week'>('month');
+  const [viewMode, setViewMode] = useState<'month' | 'week'>('week');
 
   // Auth 状态
   const [user, setUser] = useState<User | null>(() => {
@@ -272,6 +272,7 @@ export default function App() {
       if (res.ok) {
         const authUser = { ...data.user, token: data.token };
         setUser(authUser);
+        setCurrentUser(authUser.name);
         localStorage.setItem('auth_user', JSON.stringify(authUser));
         showToast('登录成功', 'success');
       } else {
@@ -284,6 +285,7 @@ export default function App() {
 
   const handleLogout = () => {
     setUser(null);
+    setCurrentUser('');
     localStorage.removeItem('auth_user');
     showToast('已退出登录', 'info');
   };
@@ -295,9 +297,12 @@ export default function App() {
       'Authorization': `Bearer ${user?.token}`
     };
     const res = await fetch(url, { ...options, headers });
-    if (res.status === 401 || res.status === 403) {
+    if (res.status === 401) {
       handleLogout();
       throw new Error('Session expired');
+    }
+    if (res.status === 403) {
+      throw new Error('Permission denied');
     }
     return res;
   }, [user]);
