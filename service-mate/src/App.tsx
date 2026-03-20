@@ -170,7 +170,7 @@ export default function App() {
   // 状态管理
   const [activeTab, setActiveTab] = useState<'calendar' | 'admin'>('calendar');
   const [currentUser, setCurrentUser] = useState<string>(''); 
-  const [viewMode, setViewMode] = useState<'month' | 'week'>('week');
+  const [viewMode, setViewMode] = useState<'month' | 'week'>('month');
 
   // Auth 状态
   const [user, setUser] = useState<User | null>(() => {
@@ -369,12 +369,11 @@ export default function App() {
       setExperts(dataExperts);
       setVisits(dataVisits);
 
-      // 默认选中第一个专家，不再支持“全部”
-      if (!currentUser && dataExperts.length > 0) {
-        setCurrentUser(dataExperts[0]);
-      } else if (currentUser === '全部' && dataExperts.length > 0) {
-        // 如果之前选的是“全部”，强制切回第一个专家
-        setCurrentUser(dataExperts[0]);
+      const preferredUser = user?.name;
+      const hasPreferred = Boolean(preferredUser && dataExperts.includes(preferredUser));
+      const isCurrentValid = Boolean(currentUser && dataExperts.includes(currentUser));
+      if (!isCurrentValid && dataExperts.length > 0) {
+        setCurrentUser(hasPreferred ? (preferredUser as string) : dataExperts[0]);
       }
     } catch (error) {
       console.error("Failed to fetch data:", error);
