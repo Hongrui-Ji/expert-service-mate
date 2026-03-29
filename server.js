@@ -26,6 +26,20 @@ app.use(express.json({ limit: '10mb' }));
 
 // 初始化数据库
 const db = new Database(DB_PATH);
+db.pragma('foreign_keys = ON');
+
+const formatLocalDate = (d = new Date()) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+};
+
+const formatLocalMonth = (d = new Date()) => {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  return `${y}-${m}`;
+};
 
 // 建表逻辑 (完全重构权限与账号系统)
 db.exec(`
@@ -63,7 +77,10 @@ db.exec(`
     city TEXT,
     assigned_expert TEXT,
     monthly_frequency INTEGER DEFAULT 1,
-    special_requirements TEXT
+    special_requirements TEXT,
+    deleted_at TEXT,
+    service_start_month TEXT,
+    service_resume_month TEXT
   );
 
   CREATE TABLE IF NOT EXISTS experts (
@@ -76,6 +93,22 @@ db.exec(`
     date TEXT,
     expert_name TEXT,
     status TEXT DEFAULT 'planned',
+    type TEXT DEFAULT 'regular',
+    title TEXT,
+    count_towards_target INTEGER DEFAULT 1,
+    created_by INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(store_id) REFERENCES stores(id)
+  );
+
+  CREATE TABLE IF NOT EXISTS store_month_plans (
+    store_id TEXT NOT NULL,
+    month TEXT NOT NULL,
+    target_frequency INTEGER NOT NULL,
+    reason TEXT,
+    updated_by INTEGER,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY(store_id, month),
     FOREIGN KEY(store_id) REFERENCES stores(id)
   );
 `);
@@ -94,6 +127,60 @@ try {
 } catch (e) {
   // Column likely already exists
 }
+
+try {
+  db.prepare("ALTER TABLE stores ADD COLUMN deleted_at TEXT").run();
+  console.log("Migration: Added deleted_at column to stores table.");
+} catch (e) {
+  // Column likely already exists
+}
+
+try {
+  db.prepare("ALTER TABLE stores ADD COLUMN service_start_month TEXT").run();
+  console.log("Migration: Added service_start_month column to stores table.");
+} catch (e) {
+  // Column likely already exists
+}
+
+try {
+  db.prepare("ALTER TABLE stores ADD COLUMN service_resume_month TEXT").run();
+  console.log("Migration: Added service_resume_month column to stores table.");
+} catch (e) {
+  // Column likely already exists
+}
+
+try {
+  db.prepare("ALTER TABLE visits ADD COLUMN type TEXT").run();
+  console.log("Migration: Added type column to visits table.");
+} catch (e) {}
+
+try {
+  db.prepare("ALTER TABLE visits ADD COLUMN title TEXT").run();
+  console.log("Migration: Added title column to visits table.");
+} catch (e) {}
+
+try {
+  db.prepare("ALTER TABLE visits ADD COLUMN count_towards_target INTEGER").run();
+  console.log("Migration: Added count_towards_target column to visits table.");
+} catch (e) {}
+
+try {
+  db.prepare("ALTER TABLE visits ADD COLUMN created_by INTEGER").run();
+  console.log("Migration: Added created_by column to visits table.");
+} catch (e) {}
+
+try {
+  db.prepare("ALTER TABLE visits ADD COLUMN created_at DATETIME").run();
+  console.log("Migration: Added created_at column to visits table.");
+} catch (e) {}
+
+try {
+  db.prepare("UPDATE visits SET type = 'regular' WHERE type IS NULL").run();
+} catch (e) {}
+
+try {
+  db.prepare("UPDATE visits SET count_towards_target = 1 WHERE count_towards_target IS NULL").run();
+} catch (e) {}
 
 // 预制角色与管理员账号
 const initRoles = db.prepare("INSERT OR IGNORE INTO roles (name, description) VALUES (?, ?)");
@@ -127,7 +214,7 @@ const authenticateToken = (req, res, next) => {
   if (!token) return res.sendStatus(401);
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
-    if (err) return res.sendStatus(403);
+    if (err) return res.sendStatus(401);
     
     // 检查用户是否在数据库中且未被禁用
     const dbUser = db.prepare('SELECT status FROM users WHERE id = ?').get(user.id);
@@ -170,7 +257,7 @@ app.post('/api/auth/login', async (req, res) => {
   const token = jwt.sign(
     { id: user.id, name: user.name, phone: user.phone, role: user.role },
     JWT_SECRET,
-    { expiresIn: '24h' }
+    { expiresIn: '7d' }
   );
 
   res.json({ 
@@ -309,16 +396,91 @@ app.get('/api/stores', authenticateToken, (req, res) => {
     assignedExpert: s.assigned_expert, 
     specialRequirements: s.special_requirements, 
     monthlyFrequency: s.monthly_frequency || 1,
-    importStatus: s.import_status
+    importStatus: s.import_status,
+    deletedAt: s.deleted_at,
+    serviceStartMonth: s.service_start_month,
+    serviceResumeMonth: s.service_resume_month
   }));
   res.json(stores);
 });
 
+app.get('/api/store-month-plans', authenticateToken, (req, res) => {
+  const month = String(req.query.month || '');
+  if (!month) return res.status(400).json({ error: 'Missing month' });
+  const rows = db.prepare('SELECT * FROM store_month_plans WHERE month = ?').all(month);
+  res.json(rows.map(r => ({
+    storeId: r.store_id,
+    month: r.month,
+    targetFrequency: r.target_frequency,
+    reason: r.reason || '',
+    updatedBy: r.updated_by || null,
+    updatedAt: r.updated_at || null
+  })));
+});
+
+app.put('/api/stores/:id/month-plan', authenticateToken, isAdmin, (req, res) => {
+  const storeId = req.params.id;
+  const { month, targetFrequency, reason } = req.body || {};
+  if (!month || targetFrequency === undefined || targetFrequency === null) {
+    return res.status(400).json({ error: 'Missing month or targetFrequency' });
+  }
+  const target = Number(targetFrequency);
+  if (!Number.isFinite(target) || target < 0) return res.status(400).json({ error: 'Invalid targetFrequency' });
+  const existingStore = db.prepare('SELECT id FROM stores WHERE id = ?').get(storeId);
+  if (!existingStore) return res.status(404).json({ error: '门店不存在' });
+
+  db.prepare(`
+    INSERT INTO store_month_plans (store_id, month, target_frequency, reason, updated_by, updated_at)
+    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(store_id, month) DO UPDATE SET
+      target_frequency=excluded.target_frequency,
+      reason=excluded.reason,
+      updated_by=excluded.updated_by,
+      updated_at=CURRENT_TIMESTAMP
+  `).run(storeId, month, Math.trunc(target), reason || '', req.user.id);
+  res.json({ success: true });
+});
+
+app.delete('/api/stores/:id/month-plan', authenticateToken, isAdmin, (req, res) => {
+  const storeId = req.params.id;
+  const month = String(req.query.month || '');
+  if (!month) return res.status(400).json({ error: 'Missing month' });
+  db.prepare('DELETE FROM store_month_plans WHERE store_id = ? AND month = ?').run(storeId, month);
+  res.json({ success: true });
+});
+
 app.post('/api/stores/batch', authenticateToken, isAdmin, (req, res) => {
   const stores = req.body;
+  const startMonth = formatLocalMonth();
   const insert = db.prepare(`
-    INSERT INTO stores (id, name, brand, province, city, assigned_expert, monthly_frequency, special_requirements, import_status)
-    VALUES (@id, @name, @brand, @province, @city, @assignedExpert, @monthlyFrequency, @specialRequirements, @importStatus)
+    INSERT INTO stores (
+      id,
+      name,
+      brand,
+      province,
+      city,
+      assigned_expert,
+      monthly_frequency,
+      special_requirements,
+      import_status,
+      service_start_month,
+      service_resume_month,
+      deleted_at
+    )
+    VALUES (
+      @id,
+      @name,
+      @brand,
+      @province,
+      @city,
+      @assignedExpert,
+      @monthlyFrequency,
+      @specialRequirements,
+      @importStatus,
+      @serviceStartMonth,
+      @serviceResumeMonth,
+      @deletedAt
+    )
     ON CONFLICT(id) DO UPDATE SET
       name=excluded.name, 
       brand=excluded.brand,
@@ -341,7 +503,10 @@ app.post('/api/stores/batch', authenticateToken, isAdmin, (req, res) => {
         assignedExpert: store.assignedExpert || '',
         monthlyFrequency: store.monthlyFrequency || 1,
         specialRequirements: store.specialRequirements || '',
-        importStatus: store.importStatus || null
+        importStatus: store.importStatus || null,
+        serviceStartMonth: store.serviceStartMonth || startMonth,
+        serviceResumeMonth: store.serviceResumeMonth || null,
+        deletedAt: store.deletedAt || null
       };
       insert.run(payload);
     }
@@ -376,13 +541,12 @@ app.put('/api/stores/:id', authenticateToken, (req, res) => {
         id
       );
     } else {
-      // 普通用户：仅允许更新 频次、专家、特殊需求
+      // 普通用户：仅允许更新 频次、专家
       // 字段级权限验证：如果尝试修改其他字段，忽略或报错。这里选择忽略非授权字段，仅更新授权字段。
-      sql += `assigned_expert=?, monthly_frequency=?, special_requirements=? WHERE id=?`;
+      sql += `assigned_expert=?, monthly_frequency=? WHERE id=?`;
       params.push(
         store.assignedExpert !== undefined ? store.assignedExpert : existing.assigned_expert,
         store.monthlyFrequency !== undefined ? store.monthlyFrequency : existing.monthly_frequency,
-        store.specialRequirements !== undefined ? store.specialRequirements : existing.special_requirements,
         id
       );
     }
@@ -396,10 +560,34 @@ app.put('/api/stores/:id', authenticateToken, (req, res) => {
 
 app.delete('/api/stores/:id', authenticateToken, isAdmin, (req, res) => {
   try {
-    db.prepare('DELETE FROM stores WHERE id = ?').run(req.params.id);
-    db.prepare('DELETE FROM visits WHERE store_id = ?').run(req.params.id);
+    const storeId = req.params.id;
+    const existing = db.prepare('SELECT * FROM stores WHERE id = ?').get(storeId);
+    if (!existing) return res.status(404).json({ error: '门店不存在' });
+
+    const today = formatLocalDate();
+    const plannedCount = db.prepare(`SELECT COUNT(*) as cnt FROM visits WHERE store_id = ? AND status = 'planned' AND date >= ?`).get(storeId, today).cnt;
+    if (plannedCount > 0) {
+      return res.status(409).json({ error: '存在待执行排班（planned），请先取消或改期后再停用门店' });
+    }
+
+    db.prepare(`UPDATE stores SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`).run(storeId);
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
+
+app.post('/api/stores/:id/restore', authenticateToken, isAdmin, (req, res) => {
+  try {
+    const storeId = req.params.id;
+    const existing = db.prepare('SELECT * FROM stores WHERE id = ?').get(storeId);
+    if (!existing) return res.status(404).json({ error: '门店不存在' });
+
+    db.prepare(`UPDATE stores SET deleted_at = NULL, service_resume_month = ? WHERE id = ?`).run(formatLocalMonth(), storeId);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 app.get('/api/visits', authenticateToken, (req, res) => {
@@ -407,23 +595,50 @@ app.get('/api/visits', authenticateToken, (req, res) => {
   let sql = 'SELECT * FROM visits';
   if (month) sql += ` WHERE date LIKE '${month}%'`;
   const visits = db.prepare(sql).all().map(v => ({
-    id: v.id, storeId: v.store_id, date: v.date, expertName: v.expert_name, status: v.status
+    id: v.id,
+    storeId: v.store_id,
+    date: v.date,
+    expertName: v.expert_name,
+    status: v.status,
+    type: v.type || 'regular',
+    title: v.title || '',
+    countTowardsTarget: v.count_towards_target === 0 ? false : true,
+    createdBy: v.created_by || null,
+    createdAt: v.created_at || null
   }));
   res.json(visits);
 });
 
 app.post('/api/visits', authenticateToken, (req, res) => {
-  const { id, storeId, date, expertName, status } = req.body;
+  const { id, storeId, date, expertName, status, type, title, countTowardsTarget } = req.body || {};
+  if (!id || !storeId || !date || !expertName) return res.status(400).json({ error: 'Missing id/storeId/date/expertName' });
+  if (req.user.role !== 'admin' && expertName !== req.user.name) {
+    return res.status(403).json({ error: 'Permission denied' });
+  }
+  const store = db.prepare('SELECT id, deleted_at FROM stores WHERE id = ?').get(storeId);
+  if (!store) return res.status(404).json({ error: '门店不存在' });
+  if (store.deleted_at) return res.status(409).json({ error: '门店已停用，无法创建排班' });
+
+  const visitType = type === 'extra' ? 'extra' : 'regular';
+  const resolvedTitle = String(title || '');
+  if (visitType === 'extra' && !resolvedTitle.trim()) return res.status(400).json({ error: 'Missing title' });
+  const resolvedStatus = status || 'planned';
+  const resolvedCountToward = countTowardsTarget !== undefined
+    ? (countTowardsTarget ? 1 : 0)
+    : (visitType === 'extra' ? 0 : 1);
   try {
-    db.prepare('INSERT INTO visits (id, store_id, date, expert_name, status) VALUES (?, ?, ?, ?, ?)').run(id, storeId, date, expertName, status || 'planned');
+    db.prepare(`
+      INSERT INTO visits (id, store_id, date, expert_name, status, type, title, count_towards_target, created_by, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `).run(id, storeId, date, expertName, resolvedStatus, visitType, resolvedTitle, resolvedCountToward, req.user.id);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 app.put('/api/visits/:id', authenticateToken, (req, res) => {
   const { id } = req.params;
-  const { date, status } = req.body || {};
-  if (!date && !status) return res.status(400).json({ error: 'Missing date or status' });
+  const { date, status, title, countTowardsTarget } = req.body || {};
+  if (!date && !status && title === undefined && countTowardsTarget === undefined) return res.status(400).json({ error: 'Missing update fields' });
   try {
     const existing = db.prepare('SELECT * FROM visits WHERE id = ?').get(id);
     if (!existing) return res.status(404).json({ error: '排班不存在' });
@@ -432,7 +647,9 @@ app.put('/api/visits/:id', authenticateToken, (req, res) => {
     }
     const newDate = date || existing.date;
     const newStatus = status || existing.status;
-    db.prepare('UPDATE visits SET date = ?, status = ? WHERE id = ?').run(newDate, newStatus, id);
+    const newTitle = title !== undefined ? String(title || '') : (existing.title || '');
+    const newCount = countTowardsTarget !== undefined ? (countTowardsTarget ? 1 : 0) : (existing.count_towards_target ?? 1);
+    db.prepare('UPDATE visits SET date = ?, status = ?, title = ?, count_towards_target = ? WHERE id = ?').run(newDate, newStatus, newTitle, newCount, id);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -440,8 +657,17 @@ app.put('/api/visits/:id', authenticateToken, (req, res) => {
 });
 
 app.delete('/api/visits/:id', authenticateToken, (req, res) => {
-  db.prepare('DELETE FROM visits WHERE id = ?').run(req.params.id);
-  res.json({ success: true });
+  try {
+    const existing = db.prepare('SELECT * FROM visits WHERE id = ?').get(req.params.id);
+    if (!existing) return res.status(404).json({ error: '排班不存在' });
+    if (req.user.role !== 'admin' && existing.expert_name !== req.user.name) {
+      return res.status(403).json({ error: 'Permission denied' });
+    }
+    db.prepare('DELETE FROM visits WHERE id = ?').run(req.params.id);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.get('/api/experts', authenticateToken, (req, res) => {

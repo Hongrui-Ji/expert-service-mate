@@ -29,7 +29,8 @@ import {
   Plus,
   CheckSquare,
   Square,
-  LogOut
+  LogOut,
+  RotateCcw
 } from 'lucide-react';
 
 import './index.css';
@@ -38,6 +39,21 @@ import './index.css';
 const API_BASE = (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'))
   ? 'http://localhost:3000/api'
   : '/api';
+
+const getJwtExp = (token: string): number | null => {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  try {
+    const payloadBase64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = payloadBase64.padEnd(payloadBase64.length + ((4 - (payloadBase64.length % 4)) % 4), '=');
+    const json = atob(padded);
+    const payload = JSON.parse(json);
+    const exp = payload?.exp;
+    return typeof exp === 'number' ? exp : null;
+  } catch {
+    return null;
+  }
+};
 
 // --- 类型定义 ---
 interface User {
@@ -67,6 +83,9 @@ interface Store {
   specialRequirements?: string;
   monthlyFrequency: number; 
   importStatus?: string; // 新增字段
+  deletedAt?: string | null;
+  serviceStartMonth?: string | null;
+  serviceResumeMonth?: string | null;
 }
 
 interface Visit {
@@ -75,6 +94,11 @@ interface Visit {
   date: string; 
   expertName: string;
   status: 'planned' | 'completed';
+  type?: 'regular' | 'extra';
+  title?: string;
+  countTowardsTarget?: boolean;
+  createdBy?: number | null;
+  createdAt?: string | null;
 }
 
 interface ToastMsg {
@@ -175,7 +199,23 @@ export default function App() {
   // Auth 状态
   const [user, setUser] = useState<User | null>(() => {
     const saved = localStorage.getItem('auth_user');
-    return saved ? JSON.parse(saved) : null;
+    if (!saved) return null;
+    try {
+      const parsed = JSON.parse(saved);
+      const token = parsed?.token;
+      if (typeof token === 'string') {
+        const exp = getJwtExp(token);
+        if (exp && exp * 1000 <= Date.now()) {
+          localStorage.removeItem('auth_user');
+          sessionStorage.setItem('auth_session_expired', '1');
+          return null;
+        }
+      }
+      return parsed;
+    } catch {
+      localStorage.removeItem('auth_user');
+      return null;
+    }
   });
   const [authFormData, setAuthFormData] = useState({ phone: '', password: '' });
   
@@ -227,7 +267,20 @@ export default function App() {
   const [adminFilterProvince, setAdminFilterProvince] = useState<string[]>(['全部']);
   const [adminFilterExpert, setAdminFilterExpert] = useState<string[]>(['全部']);
   const [adminFilterImportStatus, setAdminFilterImportStatus] = useState('否'); // 默认显示未导入门店
+  const [adminFilterSpecialRequirements, setAdminFilterSpecialRequirements] = useState<'全部' | '有' | '无'>('全部');
   const [adminSearchTerm, setAdminSearchTerm] = useState('');
+  const [monthPlansMonth, setMonthPlansMonth] = useState('');
+  const [monthPlans, setMonthPlans] = useState<Record<string, { targetFrequency: number; reason: string }>>({});
+  const [showMonthPlanModal, setShowMonthPlanModal] = useState(false);
+  const [monthPlanStore, setMonthPlanStore] = useState<Store | null>(null);
+  const [monthPlanTarget, setMonthPlanTarget] = useState(1);
+  const [monthPlanReason, setMonthPlanReason] = useState('');
+  const [showExtraModal, setShowExtraModal] = useState(false);
+  const [extraDate, setExtraDate] = useState('');
+  const [extraStoreId, setExtraStoreId] = useState('');
+  const [extraSearchTerm, setExtraSearchTerm] = useState('');
+  const [extraTitle, setExtraTitle] = useState('');
+  const [extraCountTowardsTarget, setExtraCountTowardsTarget] = useState(false);
 
   // --- 辅助函数 ---
   const getDaysInMonth = (year: number, month: number) => new Date(year, month + 1, 0).getDate();
@@ -236,6 +289,7 @@ export default function App() {
   const formatDateStr = (year: number, month: number, day: number) => {
     return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
   };
+  const formatMonthKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
 
   const getStartOfWeek = (date: Date) => {
     const d = new Date(date);
@@ -258,6 +312,13 @@ export default function App() {
       setToasts(prev => prev.filter(t => t.id !== id));
     }, 3000);
   }, []);
+
+  useEffect(() => {
+    const flag = sessionStorage.getItem('auth_session_expired');
+    if (!flag) return;
+    sessionStorage.removeItem('auth_session_expired');
+    showToast('登录已过期，请重新登录', 'info');
+  }, [showToast]);
 
   // --- Auth 逻辑 ---
   const handleAuth = async (e: React.FormEvent) => {
@@ -290,6 +351,13 @@ export default function App() {
     showToast('已退出登录', 'info');
   };
 
+  const handleSessionExpired = useCallback(() => {
+    setUser(null);
+    setCurrentUser('');
+    localStorage.removeItem('auth_user');
+    showToast('登录已过期，请重新登录', 'info');
+  }, [showToast]);
+
   // --- API ---
   const authenticatedFetch = useCallback(async (url: string, options: RequestInit = {}) => {
     const headers = {
@@ -298,14 +366,14 @@ export default function App() {
     };
     const res = await fetch(url, { ...options, headers });
     if (res.status === 401) {
-      handleLogout();
+      handleSessionExpired();
       throw new Error('Session expired');
     }
     if (res.status === 403) {
       throw new Error('Permission denied');
     }
     return res;
-  }, [user]);
+  }, [user, handleSessionExpired]);
 
   // --- 管理员账号管理逻辑 ---
   const fetchManagedUsers = useCallback(async () => {
@@ -388,12 +456,42 @@ export default function App() {
     }
   }, [user, currentUser, showToast, authenticatedFetch]);
 
+  const fetchMonthPlans = useCallback(async (month: string) => {
+    if (!user) return;
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/store-month-plans?month=${encodeURIComponent(month)}`);
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || '加载月度计划失败');
+      }
+      const rows = await res.json();
+      const map: Record<string, { targetFrequency: number; reason: string }> = {};
+      for (const r of rows || []) {
+        if (!r?.storeId) continue;
+        map[String(r.storeId)] = { targetFrequency: Number(r.targetFrequency) || 0, reason: String(r.reason || '') };
+      }
+      setMonthPlans(map);
+    } catch (e) {
+      console.error(e);
+      showToast(`月度计划加载失败：${e instanceof Error ? e.message : String(e)}`, 'error');
+      setMonthPlans({});
+    }
+  }, [user, authenticatedFetch, showToast]);
+
   useEffect(() => {
     if (user) {
       fetchAllData();
       if (user.role === 'admin') fetchManagedUsers();
     }
   }, [user, fetchAllData, fetchManagedUsers]);
+
+  useEffect(() => {
+    if (!user) return;
+    const month = formatMonthKey(currentDate);
+    if (month === monthPlansMonth) return;
+    setMonthPlansMonth(month);
+    fetchMonthPlans(month);
+  }, [user, currentDate, fetchMonthPlans, monthPlansMonth]);
 
   useEffect(() => {
     dragHoverDateRef.current = dragHoverDate;
@@ -481,7 +579,7 @@ export default function App() {
 
   // [修改] 仅显示未导入的门店用于排班
   const schedulableStores = useMemo(() => {
-    return stores.filter(s => s.importStatus !== '是');
+    return stores.filter(s => s.importStatus !== '是' && !s.deletedAt);
   }, [stores]);
 
   const myStores = useMemo(() => {
@@ -500,23 +598,34 @@ export default function App() {
   }, [visits, selectedDateForVisit, currentUser]);
 
   const unscheduledStores = useMemo(() => {
-    const year = currentDate.getFullYear();
-    const month = currentDate.getMonth() + 1;
-    const prefix = `${year}-${String(month).padStart(2, '0')}`;
-    const thisMonthVisits = visits.filter(v => v.date.startsWith(prefix) && v.expertName === currentUser);
+    const viewMonthKey = formatMonthKey(currentDate);
+    const nowMonthKey = formatMonthKey(new Date());
+    if (viewMonthKey < nowMonthKey) return [];
+
+    const prefix = `${viewMonthKey}`;
+    const thisMonthVisits = visits.filter(v => v.date.startsWith(prefix) && v.expertName === currentUser && v.countTowardsTarget !== false);
 
     return myStores.map(store => {
       const plannedCount = thisMonthVisits.filter(v => v.storeId === store.id).length;
-      const remaining = Math.max(0, store.monthlyFrequency - plannedCount);
-      return { ...store, remaining, plannedCount };
+      if (store.serviceStartMonth && viewMonthKey < store.serviceStartMonth) return { ...store, remaining: 0, plannedCount, targetFrequency: 0 };
+      if (store.serviceResumeMonth && viewMonthKey < store.serviceResumeMonth) return { ...store, remaining: 0, plannedCount, targetFrequency: 0 };
+
+      const targetFrequency = monthPlans[store.id]?.targetFrequency ?? store.monthlyFrequency;
+      const remaining = Math.max(0, targetFrequency - plannedCount);
+      return { ...store, remaining, plannedCount, targetFrequency };
     }).filter(s => s.remaining > 0);
-  }, [myStores, visits, currentDate, currentUser]);
+  }, [myStores, visits, currentDate, currentUser, monthPlans]);
+
+  const isPastMonthView = useMemo(() => {
+    return formatMonthKey(currentDate) < formatMonthKey(new Date());
+  }, [currentDate]);
 
   // 辅助函数：根据条件筛选门店
   const getFilteredStores = (
     baseStores: Store[], 
     filters: { 
       importStatus: string, 
+      specialRequirements: '全部' | '有' | '无',
       province: string[],
       city: string[], 
       brand: string[], 
@@ -527,6 +636,11 @@ export default function App() {
       const matchImportStatus = 
         filters.importStatus === '全部' || 
         (filters.importStatus === '是' ? store.importStatus === '是' : store.importStatus !== '是');
+
+      const hasSpecialRequirements = Boolean(store.specialRequirements && store.specialRequirements.trim() !== '');
+      const matchSpecialRequirements =
+        filters.specialRequirements === '全部' ||
+        (filters.specialRequirements === '有' ? hasSpecialRequirements : !hasSpecialRequirements);
       
       const matchProvince = filters.province.includes('全部') || filters.province.includes(store.province);
       const matchCity = filters.city.includes('全部') || filters.city.includes(store.city);
@@ -544,7 +658,7 @@ export default function App() {
         else matchExpert = false;
       }
       
-      return matchImportStatus && matchProvince && matchCity && matchBrand && matchExpert;
+      return matchImportStatus && matchSpecialRequirements && matchProvince && matchCity && matchBrand && matchExpert;
     });
   };
 
@@ -552,6 +666,7 @@ export default function App() {
   const uniqueProvinces = useMemo(() => {
     const filtered = getFilteredStores(stores, {
       importStatus: adminFilterImportStatus,
+      specialRequirements: adminFilterSpecialRequirements,
       province: ['全部'],
       city: adminFilterCity,
       brand: adminFilterBrand,
@@ -559,11 +674,12 @@ export default function App() {
     });
     const provinces = Array.from(new Set(filtered.map(s => s.province))).filter(p => typeof p === 'string' && p.trim() !== '');
     return ['全部', ...provinces.sort((a, b) => a.localeCompare(b, 'zh-CN'))];
-  }, [stores, adminFilterImportStatus, adminFilterCity, adminFilterBrand, adminFilterExpert]);
+  }, [stores, adminFilterImportStatus, adminFilterSpecialRequirements, adminFilterCity, adminFilterBrand, adminFilterExpert]);
 
   const uniqueCities = useMemo(() => {
     const filtered = getFilteredStores(stores, {
       importStatus: adminFilterImportStatus,
+      specialRequirements: adminFilterSpecialRequirements,
       province: adminFilterProvince,
       city: ['全部'],
       brand: adminFilterBrand,
@@ -571,11 +687,12 @@ export default function App() {
     });
     const cities = Array.from(new Set(filtered.map(s => s.city))).filter(c => typeof c === 'string' && c.trim() !== '');
     return ['全部', ...cities.sort((a, b) => a.localeCompare(b, 'zh-CN'))];
-  }, [stores, adminFilterImportStatus, adminFilterProvince, adminFilterBrand, adminFilterExpert]);
+  }, [stores, adminFilterImportStatus, adminFilterSpecialRequirements, adminFilterProvince, adminFilterBrand, adminFilterExpert]);
 
   const uniqueBrands = useMemo(() => {
     const filtered = getFilteredStores(stores, {
       importStatus: adminFilterImportStatus,
+      specialRequirements: adminFilterSpecialRequirements,
       province: adminFilterProvince,
       city: adminFilterCity,
       brand: ['全部'],
@@ -583,7 +700,7 @@ export default function App() {
     });
     const brands = Array.from(new Set(filtered.map(s => s.brand))).filter(b => typeof b === 'string' && b.trim() !== '');
     return ['全部', ...brands.sort((a, b) => a.localeCompare(b, 'zh-CN'))];
-  }, [stores, adminFilterImportStatus, adminFilterProvince, adminFilterCity, adminFilterExpert]);
+  }, [stores, adminFilterImportStatus, adminFilterSpecialRequirements, adminFilterProvince, adminFilterCity, adminFilterExpert]);
 
   const sortedExperts = useMemo(() => {
     // 过滤非字符串数据，防止 localeCompare 报错
@@ -593,6 +710,7 @@ export default function App() {
   const filterOptionsExperts = useMemo(() => {
     const filtered = getFilteredStores(stores, {
       importStatus: adminFilterImportStatus,
+      specialRequirements: adminFilterSpecialRequirements,
       province: adminFilterProvince,
       city: adminFilterCity,
       brand: adminFilterBrand,
@@ -614,7 +732,7 @@ export default function App() {
     const options = ['全部'];
     if (hasUnassigned) options.push('待分配');
     return [...options, ...validExperts];
-  }, [stores, adminFilterImportStatus, adminFilterProvince, adminFilterCity, adminFilterBrand, sortedExperts]);
+  }, [stores, adminFilterImportStatus, adminFilterSpecialRequirements, adminFilterProvince, adminFilterCity, adminFilterBrand, sortedExperts]);
 
   // [修改] 当联动筛选导致当前选中项无效时，自动重置
   useEffect(() => {
@@ -643,6 +761,7 @@ export default function App() {
   const filteredStores = useMemo(() => {
     return getFilteredStores(stores, {
       importStatus: adminFilterImportStatus,
+      specialRequirements: adminFilterSpecialRequirements,
       province: adminFilterProvince,
       city: adminFilterCity,
       brand: adminFilterBrand,
@@ -652,7 +771,7 @@ export default function App() {
       const matchSearch = store.name.toLowerCase().includes(searchLower) || store.id.toLowerCase().includes(searchLower);
       return matchSearch;
     });
-  }, [stores, adminFilterProvince, adminFilterCity, adminFilterBrand, adminFilterExpert, adminFilterImportStatus, adminSearchTerm]);
+  }, [stores, adminFilterProvince, adminFilterCity, adminFilterBrand, adminFilterExpert, adminFilterImportStatus, adminFilterSpecialRequirements, adminSearchTerm]);
 
   // 批量/单选 门店
   const toggleStoreSelection = (storeId: string) => {
@@ -977,16 +1096,137 @@ export default function App() {
     showToast('导出开始', 'success');
   };
 
-  const handleDeleteStore = async (id: string) => {
-    if(!confirm('确定删除?')) return;
+  const handleArchiveStore = async (id: string) => {
+    if(!confirm('确定停用门店？停用后门店将不再参与排班，但历史记录会保留。')) return;
     try {
       const res = await authenticatedFetch(`${API_BASE}/stores/${id}`, { method: 'DELETE' });
       if (res.ok) {
-        setStores(stores.filter(s => s.id !== id));
-        setVisits(visits.filter(v => v.storeId !== id)); 
-        showToast('已删除', 'info');
+        setStores(stores.map(s => s.id === id ? { ...s, deletedAt: new Date().toISOString() } : s));
+        showToast('已停用', 'info');
+      } else {
+        const data = await res.json();
+        showToast(data.error || '停用失败', 'error');
       }
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      showToast(`停用出错：${e instanceof Error ? e.message : String(e)}`, 'error');
+    }
+  };
+
+  const handleRestoreStore = async (id: string) => {
+    if(!confirm('确定恢复门店？恢复后将重新参与排班。')) return;
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/stores/${id}/restore`, { method: 'POST' });
+      if (res.ok) {
+        const resumeMonth = formatMonthKey(new Date());
+        setStores(stores.map(s => s.id === id ? { ...s, deletedAt: null, serviceResumeMonth: resumeMonth } : s));
+        showToast('已恢复', 'success');
+      } else {
+        const data = await res.json();
+        showToast(data.error || '恢复失败', 'error');
+      }
+    } catch (e) {
+      showToast(`恢复出错：${e instanceof Error ? e.message : String(e)}`, 'error');
+    }
+  };
+
+  const openMonthPlanModalForStore = (store: Store) => {
+    const month = formatMonthKey(currentDate);
+    const plan = monthPlans[store.id];
+    setMonthPlanStore(store);
+    setMonthPlanTarget(plan?.targetFrequency ?? store.monthlyFrequency);
+    setMonthPlanReason(plan?.reason ?? '');
+    setShowMonthPlanModal(true);
+    if (month !== monthPlansMonth) setMonthPlansMonth(month);
+  };
+
+  const handleSaveMonthPlan = async () => {
+    if (!monthPlanStore) return;
+    const month = formatMonthKey(currentDate);
+    const target = Math.max(0, Math.trunc(Number(monthPlanTarget) || 0));
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/stores/${monthPlanStore.id}/month-plan`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ month, targetFrequency: target, reason: monthPlanReason })
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || '保存失败');
+      }
+      setMonthPlans(prev => ({ ...prev, [monthPlanStore.id]: { targetFrequency: target, reason: monthPlanReason } }));
+      setShowMonthPlanModal(false);
+      setMonthPlanStore(null);
+      showToast('本月计划已更新', 'success');
+    } catch (e) {
+      showToast(`保存失败：${e instanceof Error ? e.message : String(e)}`, 'error');
+    }
+  };
+
+  const handleClearMonthPlan = async () => {
+    if (!monthPlanStore) return;
+    const month = formatMonthKey(currentDate);
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/stores/${monthPlanStore.id}/month-plan?month=${encodeURIComponent(month)}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || '清除失败');
+      }
+      setMonthPlans(prev => {
+        const next = { ...prev };
+        delete next[monthPlanStore.id];
+        return next;
+      });
+      setShowMonthPlanModal(false);
+      setMonthPlanStore(null);
+      showToast('已清除本月覆盖', 'success');
+    } catch (e) {
+      showToast(`清除失败：${e instanceof Error ? e.message : String(e)}`, 'error');
+    }
+  };
+
+  const openExtraVisitModal = (dateStr?: string) => {
+    const resolvedDate = dateStr || selectedDateForVisit || formatDate(new Date());
+    setExtraDate(resolvedDate);
+    setExtraStoreId('');
+    setExtraSearchTerm('');
+    setExtraTitle('');
+    setExtraCountTowardsTarget(false);
+    setShowExtraModal(true);
+  };
+
+  const handleCreateExtraVisit = async () => {
+    const expertName = currentUser || user?.name || '';
+    if (!expertName) return showToast('未选择专家', 'error');
+    if (!extraDate) return showToast('请选择日期', 'error');
+    if (!extraStoreId) return showToast('请选择门店', 'error');
+    if (!extraTitle.trim()) return showToast('请填写上门原因', 'error');
+
+    const newVisit: Visit = {
+      id: crypto.randomUUID(),
+      storeId: extraStoreId,
+      date: extraDate,
+      expertName,
+      status: 'planned',
+      type: 'extra',
+      title: extraTitle,
+      countTowardsTarget: user?.role === 'admin' ? extraCountTowardsTarget : false
+    };
+    try {
+      const res = await authenticatedFetch(`${API_BASE}/visits`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newVisit)
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || '创建失败');
+      }
+      setVisits(prev => [...prev, newVisit]);
+      setShowExtraModal(false);
+      showToast('已创建临时上门', 'success');
+    } catch (e) {
+      showToast(`创建失败：${e instanceof Error ? e.message : String(e)}`, 'error');
+    }
   };
 
   const handleSaveEdit = async () => {
@@ -1054,17 +1294,26 @@ export default function App() {
           <div className="hidden md:block mt-1 space-y-1 overflow-y-auto max-h-[4.5rem] no-scrollbar">
             {dayVisits.slice(0, 3).map(visit => {
               const store = stores.find(s => s.id === visit.storeId);
+              const todayStr = formatDate(new Date());
+              const isAutoCompleted = visit.status === 'completed' && visit.date < todayStr;
+              const canDrag = !store?.deletedAt && (visit.status === 'planned' || isAutoCompleted);
+              const isExtra = visit.type === 'extra';
+              const pillClass = !canDrag
+                ? 'bg-gray-100 text-gray-500 cursor-not-allowed opacity-80'
+                : isExtra
+                  ? 'bg-orange-100 text-orange-900 cursor-grab active:cursor-grabbing'
+                  : 'bg-blue-100 text-blue-900 cursor-grab active:cursor-grabbing';
               return (
                 // [修改] 加入原生 tooltip，允许换行显示避免文字被阶段
                 <div
                   key={visit.id}
-                  draggable
-                  onDragStart={beginVisitDrag(visit.id)}
+                  draggable={canDrag}
+                  onDragStart={canDrag ? beginVisitDrag(visit.id) : undefined}
                   onDragEnd={handleDragEnd}
                   title={`${store?.name} (${store?.brand} · ${store?.city})`}
-                  className={`whitespace-normal break-words line-clamp-2 leading-tight text-[10px] bg-blue-100 text-blue-900 p-0.5 rounded px-1 mb-0.5 cursor-grab active:cursor-grabbing transition ${dragging?.kind === 'visit' && dragging.id === visit.id ? 'opacity-50' : ''}`}
+                  className={`whitespace-normal break-words line-clamp-2 leading-tight text-[10px] p-0.5 rounded px-1 mb-0.5 transition ${pillClass} ${dragging?.kind === 'visit' && dragging.id === visit.id ? 'opacity-50' : ''}`}
                 >
-                  {store?.name}
+                  {isExtra ? `临时：${store?.name}` : store?.name}
                 </div>
               );
             })}
@@ -1124,18 +1373,33 @@ export default function App() {
             <div className="h-full min-h-[100px]" title="点击选中该日期并进行排班">
               {dayVisits.map(visit => {
                 const store = stores.find(s => s.id === visit.storeId);
+                const todayStr = formatDate(new Date());
+                const isAutoCompleted = visit.status === 'completed' && visit.date < todayStr;
+                const canDrag = !store?.deletedAt && (visit.status === 'planned' || isAutoCompleted);
+                const canDelete = !store?.deletedAt && visit.status === 'planned';
+                const isExtra = visit.type === 'extra';
+                const cardClass = !canDrag
+                  ? 'bg-gray-50 border-l-4 border-l-gray-300 cursor-not-allowed opacity-80'
+                  : isExtra
+                    ? 'bg-orange-50 border-l-4 border-l-orange-500 hover:shadow-md cursor-grab active:cursor-grabbing'
+                    : 'bg-white border-l-4 border-l-blue-500 hover:shadow-md cursor-grab active:cursor-grabbing';
                 return (
                   <div
                     key={visit.id}
-                    draggable
-                    onDragStart={beginVisitDrag(visit.id)}
+                    draggable={canDrag}
+                    onDragStart={canDrag ? beginVisitDrag(visit.id) : undefined}
                     onDragEnd={handleDragEnd}
-                    className={`relative group bg-white border-l-4 border-l-blue-500 shadow-sm border border-gray-200 rounded p-2 hover:shadow-md transition cursor-grab active:cursor-grabbing ${dragging?.kind === 'visit' && dragging.id === visit.id ? 'opacity-50' : ''}`}
+                    className={`relative group shadow-sm border border-gray-200 rounded p-2 transition ${cardClass} ${dragging?.kind === 'visit' && dragging.id === visit.id ? 'opacity-50' : ''}`}
                   >
                     {/* [修改] 移除 truncate，允许店名完整换行显示，并增加原生 tooltip */}
-                    <div className="font-bold text-gray-800 text-sm whitespace-normal break-words leading-snug pr-4" title={`${store?.name} (${store?.brand} · ${store?.city})`}>{store?.name}</div>
+                    <div className="font-bold text-gray-800 text-sm whitespace-normal break-words leading-snug pr-4" title={`${store?.name} (${store?.brand} · ${store?.city})`}>
+                      {isExtra ? `临时：${store?.name}` : store?.name}
+                    </div>
+                    {isExtra && <div className="text-[10px] text-orange-700 mt-1 whitespace-normal break-words leading-tight">{visit.title || ''}</div>}
                     <div className="flex items-center gap-1 text-[10px] text-gray-500 mt-1"><MapPin size={10}/> {store?.city}</div>
-                    <button onClick={(e) => handleRemoveVisit(visit.id, e)} className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition"><X size={12}/></button>
+                    {canDelete && (
+                      <button onClick={(e) => handleRemoveVisit(visit.id, e)} className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 text-gray-400 hover:text-red-500 transition"><X size={12}/></button>
+                    )}
                   </div>
                 )
               })}
@@ -1182,20 +1446,31 @@ export default function App() {
             {dayVisits.length === 0 ? <div className="text-xs text-gray-300 italic">点击添加安排</div> : dayVisits.map(visit => {
                 const store = stores.find(s => s.id === visit.storeId);
                 const label = store?.name || '门店';
+                const todayStr = formatDate(new Date());
+                const isAutoCompleted = visit.status === 'completed' && visit.date < todayStr;
+                const canDrag = !store?.deletedAt && (visit.status === 'planned' || isAutoCompleted);
+                const canDelete = !store?.deletedAt && visit.status === 'planned';
+                const isExtra = visit.type === 'extra';
+                const itemClass = !canDrag
+                  ? 'bg-gray-50 opacity-80'
+                  : isExtra
+                    ? 'bg-orange-50'
+                    : 'bg-white';
                 return (
                   <div
                     key={visit.id}
-                    onTouchStart={beginMobileVisitLongPress(visit.id, label, dateStr)}
-                    onTouchMove={cancelMobileLongPress}
-                    onTouchEnd={cancelMobileLongPressEnd}
-                    onTouchCancel={cancelMobileLongPressEnd}
-                    className={`bg-white border border-gray-200 rounded-lg p-3 shadow-sm flex justify-between items-center transition ${touchDrag?.visitId === visit.id ? 'opacity-50' : ''}`}
+                    onTouchStart={canDrag ? beginMobileVisitLongPress(visit.id, label, dateStr) : undefined}
+                    onTouchMove={canDrag ? cancelMobileLongPress : undefined}
+                    onTouchEnd={canDrag ? cancelMobileLongPressEnd : undefined}
+                    onTouchCancel={canDrag ? cancelMobileLongPressEnd : undefined}
+                    className={`border border-gray-200 rounded-lg p-3 shadow-sm flex justify-between items-center transition ${itemClass} ${touchDrag?.visitId === visit.id ? 'opacity-50' : ''}`}
                   >
                     <div>
-                      <div className="font-bold text-gray-800 text-sm whitespace-normal break-words leading-snug">{store?.name}</div>
+                      <div className="font-bold text-gray-800 text-sm whitespace-normal break-words leading-snug">{isExtra ? `临时：${store?.name}` : store?.name}</div>
+                      {isExtra && <div className="text-[10px] text-orange-700 mt-1 whitespace-normal break-words leading-tight">{visit.title || ''}</div>}
                       <div className="text-xs text-gray-500 mt-1">{store?.brand} · {store?.city}</div>
                     </div>
-                    <button onClick={(e) => handleRemoveVisit(visit.id, e)} className="p-2 text-gray-400 hover:text-red-500"><X size={18}/></button>
+                    {canDelete && <button onClick={(e) => handleRemoveVisit(visit.id, e)} className="p-2 text-gray-400 hover:text-red-500"><X size={18}/></button>}
                   </div>
                 );
               })
@@ -1433,7 +1708,7 @@ export default function App() {
                 <div className="flex justify-between items-center">
                   <h3 className="font-bold text-gray-700">门店库 ({filteredStores.length})</h3>
                   <div className="flex items-center gap-2">
-                    {(!adminFilterProvince.includes('全部') || !adminFilterCity.includes('全部') || !adminFilterBrand.includes('全部') || !adminFilterExpert.includes('全部') || adminFilterImportStatus !== '否' || adminSearchTerm) && (
+                    {(!adminFilterProvince.includes('全部') || !adminFilterCity.includes('全部') || !adminFilterBrand.includes('全部') || !adminFilterExpert.includes('全部') || adminFilterImportStatus !== '否' || adminFilterSpecialRequirements !== '全部' || adminSearchTerm) && (
                       <button 
                         onClick={() => {
                           setAdminFilterProvince(['全部']);
@@ -1441,6 +1716,7 @@ export default function App() {
                           setAdminFilterBrand(['全部']);
                           setAdminFilterExpert(['全部']);
                           setAdminFilterImportStatus('否');
+                          setAdminFilterSpecialRequirements('全部');
                           setAdminSearchTerm('');
                         }}
                         className="text-xs text-red-500 hover:underline"
@@ -1496,6 +1772,19 @@ export default function App() {
                       value={adminFilterExpert}
                       onChange={setAdminFilterExpert}
                     />
+
+                    <div className="flex flex-col gap-1 min-w-[140px]">
+                      <span className="text-[10px] text-gray-400 font-bold uppercase">特殊需求</span>
+                      <select
+                        value={adminFilterSpecialRequirements}
+                        onChange={(e) => setAdminFilterSpecialRequirements(e.target.value as any)}
+                        className="p-2 border rounded text-sm bg-white"
+                      >
+                        <option value="全部">全部</option>
+                        <option value="有">仅显示有</option>
+                        <option value="无">仅显示无</option>
+                      </select>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1517,7 +1806,7 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody>{filteredStores.map((store) => (
-                    <tr key={store.id} className="bg-white border-b hover:bg-gray-50 group">
+                    <tr key={store.id} className={`bg-white border-b hover:bg-gray-50 group ${store.deletedAt ? 'opacity-60' : ''}`}>
                       <td className="px-4 py-4 font-mono text-xs text-gray-500">{store.id}</td>
                       <td className="px-4 py-4 font-medium">{store.name}</td>
                       <td className="px-4 py-4"><span className="bg-gray-100 px-2 py-1 rounded text-[10px] font-bold">{store.brand}</span></td>
@@ -1535,7 +1824,12 @@ export default function App() {
                         <div className="flex justify-end gap-2">
                           <button onClick={() => setEditingStore(store)} className="text-blue-600 hover:bg-blue-50 p-1.5 rounded-lg transition"><Edit2 size={16}/></button>
                           {user.role === 'admin' && (
-                            <button onClick={() => handleDeleteStore(store.id)} className="text-red-600 hover:bg-red-50 p-1.5 rounded-lg transition"><Trash2 size={16}/></button>
+                            <button onClick={() => openMonthPlanModalForStore(store)} className="text-indigo-700 hover:bg-indigo-50 p-1.5 rounded-lg transition"><Clock size={16}/></button>
+                          )}
+                          {user.role === 'admin' && (
+                            store.deletedAt
+                              ? <button onClick={() => handleRestoreStore(store.id)} className="text-green-700 hover:bg-green-50 p-1.5 rounded-lg transition"><RotateCcw size={16}/></button>
+                              : <button onClick={() => handleArchiveStore(store.id)} className="text-red-600 hover:bg-red-50 p-1.5 rounded-lg transition"><Trash2 size={16}/></button>
                           )}
                         </div>
                       </td>
@@ -1546,7 +1840,7 @@ export default function App() {
 
               <div className="md:hidden bg-gray-50 p-4 space-y-3">
                 {filteredStores.map(store => (
-                  <div key={store.id} className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
+                  <div key={store.id} className={`bg-white p-4 rounded-lg shadow-sm border border-gray-100 ${store.deletedAt ? 'opacity-60' : ''}`}>
                     <div className="flex justify-between items-start mb-2">
                       <div>
                         <div className="font-bold text-gray-900 text-lg">{store.name}</div>
@@ -1568,8 +1862,18 @@ export default function App() {
                         <Edit2 size={14}/> 编辑
                       </button>
                       {user.role === 'admin' && (
-                        <button onClick={() => handleDeleteStore(store.id)} className="flex items-center gap-1 text-sm text-red-600 bg-red-50 px-3 py-1.5 rounded-md">
-                          <Trash2 size={14}/> 删除
+                        <button onClick={() => openMonthPlanModalForStore(store)} className="flex items-center gap-1 text-sm text-indigo-700 bg-indigo-50 px-3 py-1.5 rounded-md">
+                          <Clock size={14}/> 本月计划
+                        </button>
+                      )}
+                      {user.role === 'admin' && (
+                        <button onClick={() => handleArchiveStore(store.id)} className="flex items-center gap-1 text-sm text-red-600 bg-red-50 px-3 py-1.5 rounded-md">
+                          <Trash2 size={14}/> 停用
+                        </button>
+                      )}
+                      {user.role === 'admin' && store.deletedAt && (
+                        <button onClick={() => handleRestoreStore(store.id)} className="flex items-center gap-1 text-sm text-green-700 bg-green-50 px-3 py-1.5 rounded-md">
+                          <RotateCcw size={14}/> 恢复
                         </button>
                       )}
                     </div>
@@ -1586,11 +1890,14 @@ export default function App() {
             <div className="hidden lg:flex lg:w-72 w-full flex-shrink-0 flex-col bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
                 <div className="p-4 bg-gray-50 border-b border-gray-200">
                   <h3 className="font-bold text-gray-800 flex items-center justify-between"><span>待安排门店</span><span className="bg-orange-100 text-orange-800 text-xs px-2 py-1 rounded-full">{unscheduledStores.length}</span></h3>
-                  <p className="text-xs text-gray-500 mt-1">{currentUser} 本月剩余任务 (仅显示未导入门店)</p>
+                  <p className="text-xs text-gray-500 mt-1">
+                    {isPastMonthView ? '历史月份仅用于查看，不显示待排门店' : `${currentUser} ${formatMonthKey(currentDate)} 待排门店 (仅显示未导入门店)`}
+                  </p>
                 </div>
                 <div className="flex-1 overflow-y-auto p-3 space-y-2 custom-scrollbar">
-                  {unscheduledStores.length === 0 && <div className="text-center text-gray-400 py-8 text-xs">没有未导入的待办任务</div>}
-                  {unscheduledStores.map(store => {
+                  {isPastMonthView && <div className="text-center text-gray-400 py-8 text-xs">切换到当前月或未来月份后，才会显示待排门店</div>}
+                  {!isPastMonthView && unscheduledStores.length === 0 && <div className="text-center text-gray-400 py-8 text-xs">没有未导入的待办任务</div>}
+                  {!isPastMonthView && unscheduledStores.map(store => {
                     const isSelected = selectedStoreIds.includes(store.id);
                     return (
                       <div 
@@ -1610,8 +1917,8 @@ export default function App() {
                         </div>
                         <div className="flex justify-between text-xs text-gray-400 mt-2 items-center">
                           <span className="bg-gray-100 px-1 rounded">{store.city}</span>
-                          <span className={`px-1.5 py-0.5 rounded font-medium ${store.plannedCount >= store.monthlyFrequency ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
-                            进度: {store.plannedCount}/{store.monthlyFrequency}
+                          <span className={`px-1.5 py-0.5 rounded font-medium ${store.plannedCount >= store.targetFrequency ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
+                            进度: {store.plannedCount}/{store.targetFrequency}
                           </span>
                         </div>
                       </div>
@@ -1621,39 +1928,44 @@ export default function App() {
                 <div className="p-3 border-t border-gray-200 bg-gray-50">
                   <button 
                     onClick={handleBatchAddVisits}
-                    disabled={selectedStoreIds.length === 0}
+                    disabled={isPastMonthView || selectedStoreIds.length === 0}
                     className="w-full bg-blue-600 text-white py-2 rounded-lg text-sm font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                   >
                     <Plus size={16}/> 
-                    {selectedStoreIds.length > 0 ? `批量添加 (${selectedStoreIds.length})` : '请选择门店'}
+                    {isPastMonthView ? '历史月份不可排' : (selectedStoreIds.length > 0 ? `批量添加 (${selectedStoreIds.length})` : '请选择门店')}
                   </button>
                   <p className="text-[10px] text-center text-gray-400 mt-2">提示：选中左侧门店后，点击按钮批量加到当前选中日期</p>
                 </div>
             </div>
 
             <div className="flex-1 bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden relative">
-              <div className="p-4 border-b border-gray-200 flex justify-between items-center bg-white">
-                 <div className="flex items-center gap-4">
-                   <div>
-                     <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
-                       {currentDate.getFullYear()}年 {currentDate.getMonth() + 1}月
-                       {viewMode === 'week' && <span className="text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full font-normal">第 {Math.ceil(currentDate.getDate() / 7)} 周</span>}
-                     </h2>
-                   </div>
-                   <div className="flex items-center bg-gray-100 rounded-lg p-0.5">
-                     <button onClick={handlePrev} className="p-1.5 hover:bg-white rounded-md transition text-gray-600"><ChevronLeft size={16}/></button>
-                     <button onClick={handleNext} className="p-1.5 hover:bg-white rounded-md transition text-gray-600"><ChevronRight size={16}/></button>
-                   </div>
-                 </div>
-                 
-                 <div className="flex bg-gray-100 p-1 rounded-lg">
-                   <button onClick={() => { setViewMode('month'); setShowDetailsModal(false); }} className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium transition ${viewMode === 'month' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
-                     <Grid3X3 size={14}/> 月
-                   </button>
-                   <button onClick={() => { setViewMode('week'); setShowDetailsModal(false); }} className={`flex items-center gap-1 px-3 py-1.5 rounded-md text-sm font-medium transition ${viewMode === 'week' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
-                     <LayoutList size={14}/> 周
-                   </button>
-                 </div>
+              <div className="p-4 border-b border-gray-200 bg-white">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-center justify-between gap-3">
+                    <h2 className="text-lg font-bold text-gray-800 flex flex-col sm:flex-row sm:items-center sm:gap-2 leading-tight">
+                      <span>{currentDate.getFullYear()}年 {currentDate.getMonth() + 1}月</span>
+                      {viewMode === 'week' && <span className="text-xs bg-blue-100 text-blue-800 px-2 py-0.5 rounded-full font-normal w-fit mt-1 sm:mt-0">第 {Math.ceil(currentDate.getDate() / 7)} 周</span>}
+                    </h2>
+                    <div className="flex items-center bg-gray-100 rounded-lg p-0.5 flex-shrink-0">
+                      <button onClick={handlePrev} className="p-1.5 hover:bg-white rounded-md transition text-gray-600"><ChevronLeft size={16}/></button>
+                      <button onClick={handleNext} className="p-1.5 hover:bg-white rounded-md transition text-gray-600"><ChevronRight size={16}/></button>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2">
+                    <button onClick={() => openExtraVisitModal()} className="flex items-center gap-1 px-3 py-2 rounded-lg text-sm font-medium bg-orange-50 text-orange-700 hover:bg-orange-100 transition">
+                      <Plus size={14}/> 临时上门
+                    </button>
+                    <div className="flex bg-gray-100 p-1 rounded-lg flex-shrink-0">
+                      <button onClick={() => { setViewMode('month'); setShowDetailsModal(false); }} className={`flex items-center gap-1 px-3 py-2 rounded-md text-sm font-medium transition ${viewMode === 'month' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+                        <Grid3X3 size={14}/> 月
+                      </button>
+                      <button onClick={() => { setViewMode('week'); setShowDetailsModal(false); }} className={`flex items-center gap-1 px-3 py-2 rounded-md text-sm font-medium transition ${viewMode === 'week' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
+                        <LayoutList size={14}/> 周
+                      </button>
+                    </div>
+                  </div>
+                </div>
               </div>
               
               <div className="flex-1 overflow-auto bg-gray-50 relative">
@@ -1712,7 +2024,14 @@ export default function App() {
                  <div><label className="block text-sm font-medium text-gray-700 mb-1">服务频次</label><input type="number" min="1" value={editingStore.monthlyFrequency} onChange={(e) => setEditingStore({...editingStore, monthlyFrequency: parseInt(e.target.value)})} className="w-full p-2 border rounded text-sm"/></div>
                </div>
                <div><label className="block text-sm font-medium text-gray-700 mb-1">负责专家</label><select value={editingStore.assignedExpert} onChange={(e) => setEditingStore({...editingStore, assignedExpert: e.target.value})} className="w-full p-2 border rounded text-sm bg-white"><option value="">待分配</option>{sortedExperts.map(e=><option key={e} value={e}>{e}</option>)}</select></div>
-               <div><label className="block text-sm font-medium text-gray-700 mb-1">特殊需求</label><textarea rows={2} value={editingStore.specialRequirements} onChange={(e) => setEditingStore({...editingStore, specialRequirements: e.target.value})} className="w-full p-2 border rounded text-sm"/></div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">特殊需求</label>
+                {user.role === 'admin' ? (
+                  <textarea rows={2} value={editingStore.specialRequirements} onChange={(e) => setEditingStore({...editingStore, specialRequirements: e.target.value})} className="w-full p-2 border rounded text-sm"/>
+                ) : (
+                  <div className="w-full p-2 bg-gray-50 border border-gray-200 rounded text-sm text-gray-600 whitespace-pre-wrap">{editingStore.specialRequirements || '-'}</div>
+                )}
+              </div>
                <div>
                    <label className="block text-sm font-medium text-gray-700 mb-1">导入状态</label>
                    {user.role === 'admin' ? (
@@ -1818,14 +2137,20 @@ export default function App() {
                    const s = stores.find(store => store.id === v.storeId);
                    return (
                      <div key={v.id} className="flex justify-between items-center bg-gray-50 p-2 rounded border border-gray-100">
-                       <span className="font-medium whitespace-normal break-words leading-tight">{s?.name}</span>
+                      <div className="min-w-0 pr-2">
+                        <div className="font-medium whitespace-normal break-words leading-tight">{s?.name}</div>
+                        {v.type === 'extra' && <div className="text-[10px] text-orange-700 mt-0.5 whitespace-normal break-words leading-tight">临时：{v.title || '-'}</div>}
+                      </div>
                        <button onClick={(e) => handleRemoveVisit(v.id, e)} className="text-red-500 flex-shrink-0 ml-2"><Trash2 size={16}/></button>
                      </div>
                    )
                  })}
                </div>
                <div className="mt-4 pt-4 border-t border-gray-100">
-                 <button onClick={() => setShowAddModal(true)} className="w-full py-2 bg-blue-600 text-white rounded-lg flex items-center justify-center gap-2"><Plus size={16}/> 增加门店计划</button>
+                <div className="space-y-2">
+                  <button onClick={() => setShowAddModal(true)} className="w-full py-2 bg-blue-600 text-white rounded-lg flex items-center justify-center gap-2"><Plus size={16}/> 增加门店计划</button>
+                  <button onClick={() => openExtraVisitModal(selectedDateForVisit)} className="w-full py-2 bg-orange-600 text-white rounded-lg flex items-center justify-center gap-2"><Plus size={16}/> 新增临时上门</button>
+                </div>
                </div>
             </div>
           </div>
@@ -1842,7 +2167,11 @@ export default function App() {
             </div>
             
             <div className="flex-1 overflow-y-auto p-4 space-y-3 bg-gray-50 pb-20">
-              {unscheduledStores.length === 0 ? <div className="text-center py-8 text-gray-400">所有未导入门店任务已安排！</div> : unscheduledStores.map(store => {
+              {isPastMonthView ? (
+                <div className="text-center py-8 text-gray-400">历史月份不显示待排门店</div>
+              ) : unscheduledStores.length === 0 ? (
+                <div className="text-center py-8 text-gray-400">所有未导入门店任务已安排！</div>
+              ) : unscheduledStores.map(store => {
                   const isSelected = selectedStoreIds.includes(store.id);
                   return (
                     <div 
@@ -1856,8 +2185,8 @@ export default function App() {
                         <div className="font-bold text-gray-800 whitespace-normal break-words leading-tight">{store.name}</div>
                         <div className="text-xs text-gray-500 mt-1 flex gap-2">
                           <span>{store.city}</span>
-                          <span className={`${store.plannedCount >= store.monthlyFrequency ? 'text-green-600' : 'text-blue-600'}`}>
-                            进度: {store.plannedCount}/{store.monthlyFrequency}
+                          <span className={`${store.plannedCount >= store.targetFrequency ? 'text-green-600' : 'text-blue-600'}`}>
+                            进度: {store.plannedCount}/{store.targetFrequency}
                           </span>
                         </div>
                       </div>
@@ -1872,11 +2201,99 @@ export default function App() {
             <div className="p-4 border-t border-gray-200 bg-white absolute bottom-0 left-0 right-0 rounded-b-xl">
               <button 
                 onClick={handleBatchAddVisits}
-                disabled={selectedStoreIds.length === 0}
+                disabled={isPastMonthView || selectedStoreIds.length === 0}
                 className="w-full bg-blue-600 text-white py-3 rounded-lg text-base font-bold shadow-md active:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {selectedStoreIds.length > 0 ? `确认添加 ${selectedStoreIds.length} 个门店` : '请选择门店'}
+                {isPastMonthView ? '历史月份不可排' : (selectedStoreIds.length > 0 ? `确认添加 ${selectedStoreIds.length} 个门店` : '请选择门店')}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showMonthPlanModal && monthPlanStore && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center">
+              <div>
+                <div className="font-bold text-gray-800">本月计划</div>
+                <div className="text-xs text-gray-500 mt-1">{monthPlanStore.name} · {formatMonthKey(currentDate)}</div>
+              </div>
+              <button onClick={() => { setShowMonthPlanModal(false); setMonthPlanStore(null); }}><X size={20}/></button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">本月目标次数</label>
+                <input type="number" min="0" value={monthPlanTarget} onChange={(e) => setMonthPlanTarget(parseInt(e.target.value) || 0)} className="w-full p-2 border rounded text-sm"/>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">原因</label>
+                <textarea rows={3} value={monthPlanReason} onChange={(e) => setMonthPlanReason(e.target.value)} className="w-full p-2 border rounded text-sm"/>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => { setShowMonthPlanModal(false); setMonthPlanStore(null); }} className="flex-1 bg-gray-100 text-gray-700 py-2 rounded-lg text-sm font-medium">取消</button>
+                <button onClick={handleSaveMonthPlan} className="flex-1 bg-blue-600 text-white py-2 rounded-lg text-sm font-medium">保存</button>
+              </div>
+              {monthPlans[monthPlanStore.id] && (
+                <button onClick={handleClearMonthPlan} className="w-full bg-white text-red-600 py-2 rounded-lg text-sm font-medium border border-red-200">清除本月覆盖</button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showExtraModal && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-lg overflow-hidden">
+            <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center">
+              <div className="font-bold text-gray-800">新增临时上门</div>
+              <button onClick={() => setShowExtraModal(false)}><X size={20}/></button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">日期</label>
+                  <input type="date" value={extraDate} onChange={(e) => setExtraDate(e.target.value)} className="w-full p-2 border rounded text-sm"/>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">门店搜索</label>
+                  <input type="text" value={extraSearchTerm} onChange={(e) => setExtraSearchTerm(e.target.value)} className="w-full p-2 border rounded text-sm" placeholder="输入门店名/ID"/>
+                </div>
+              </div>
+              <div className="border rounded-lg max-h-48 overflow-y-auto">
+                {(stores
+                  .filter(s => {
+                    const q = extraSearchTerm.trim().toLowerCase();
+                    if (!q) return true;
+                    return s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q);
+                  })
+                  .slice(0, 30)
+                ).map(s => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => setExtraStoreId(s.id)}
+                    className={`w-full text-left px-3 py-2 text-sm border-b last:border-b-0 hover:bg-gray-50 ${extraStoreId === s.id ? 'bg-orange-50' : 'bg-white'}`}
+                  >
+                    <div className="font-medium text-gray-800 whitespace-normal break-words leading-tight">{s.name}</div>
+                    <div className="text-[10px] text-gray-500 mt-0.5">{s.id} · {s.brand || '-'} · {s.city}</div>
+                  </button>
+                ))}
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">上门原因</label>
+                <textarea rows={3} value={extraTitle} onChange={(e) => setExtraTitle(e.target.value)} className="w-full p-2 border rounded text-sm" placeholder="例如：报修、复查、紧急处理"/>
+              </div>
+              {user?.role === 'admin' && (
+                <label className="flex items-center gap-2 text-sm text-gray-700">
+                  <input type="checkbox" checked={extraCountTowardsTarget} onChange={(e) => setExtraCountTowardsTarget(e.target.checked)} />
+                  计入当月目标次数
+                </label>
+              )}
+              <div className="flex gap-2">
+                <button onClick={() => setShowExtraModal(false)} className="flex-1 bg-gray-100 text-gray-700 py-2 rounded-lg text-sm font-medium">取消</button>
+                <button onClick={handleCreateExtraVisit} className="flex-1 bg-orange-600 text-white py-2 rounded-lg text-sm font-medium">创建</button>
+              </div>
             </div>
           </div>
         </div>

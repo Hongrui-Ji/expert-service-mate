@@ -46,6 +46,7 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 - **认证模块 (Login)**:
   - 手机号 + 密码登录。
   - JWT Token 存储与请求拦截。
+  - Token 默认有效期 7 天；过期或无效 Token 返回 401 并要求重新登录。
 - **排班日历 (Calendar Tab)**: 
   - 支持月视图和周视图切换。
   - 必须选择特定专家查看其排班记录（不再支持“全部专家”视图）。
@@ -94,11 +95,15 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 - `id`: TEXT PRIMARY KEY
 - `name`: TEXT
 - `brand`: TEXT
-- `city`: TEXT (原 Province 字段已移除)
+- `province`: TEXT
+- `city`: TEXT
 - `assigned_expert`: TEXT (关联 User Name)
 - `monthly_frequency`: INTEGER
 - `special_requirements`: TEXT
 - `import_status`: TEXT (导入状态: 是/否/空)
+- `deleted_at`: TEXT (停用时间；非空表示门店已停用/归档)
+- `service_start_month`: TEXT (YYYY-MM，门店从该月开始纳入常规待排计算；新增门店默认=创建当月)
+- `service_resume_month`: TEXT (YYYY-MM，门店恢复后从该月开始重新纳入常规待排计算；恢复门店默认=恢复当月)
 
 ### Visits (排班表)
 - `id`: TEXT PRIMARY KEY
@@ -106,6 +111,19 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 - `date`: TEXT (YYYY-MM-DD)
 - `expert_name`: TEXT
 - `status`: TEXT
+- `type`: TEXT (`regular` 常规 / `extra` 临时)
+- `title`: TEXT (临时上门原因；`extra` 必填)
+- `count_towards_target`: INTEGER (0/1，是否计入当月目标次数)
+- `created_by`: INTEGER (创建者 user.id)
+- `created_at`: DATETIME
+
+### Store Month Plans (门店月度计划表)
+- `store_id`: TEXT
+- `month`: TEXT (YYYY-MM)
+- `target_frequency`: INTEGER (该月目标次数，可为 0)
+- `reason`: TEXT (原因/备注)
+- `updated_by`: INTEGER (更新者 user.id)
+- `updated_at`: DATETIME
 
 ### Audit Logs (审计日志)
 - `id`: INTEGER PRIMARY KEY
@@ -125,14 +143,19 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 | **门店管理** | 查看列表 | GET `/api/stores` | ✅ | ✅ |
 | | 单个更新 | PUT `/api/stores/:id` | ✅ (所有字段) | ⚠️ (仅限频次/专家/需求) |
 | | 批量导入 | POST `/api/stores/batch` | ✅ | ⛔ 403 |
-| | 删除门店 | DELETE `/api/stores/:id` | ✅ | ⛔ 403 |
+| | 停用门店 | DELETE `/api/stores/:id` | ✅ | ⛔ 403 |
+| | 恢复门店 | POST `/api/stores/:id/restore` | ✅ | ⛔ 403 |
+| **月度计划** | 获取某月计划 | GET `/api/store-month-plans?month=YYYY-MM` | ✅ | ✅ |
+| | 设置本月计划 | PUT `/api/stores/:id/month-plan` | ✅ | ⛔ 403 |
+| | 清除本月计划 | DELETE `/api/stores/:id/month-plan?month=YYYY-MM` | ✅ | ⛔ 403 |
 | **排班管理** | 查看排班 | GET `/api/visits` | ✅ | ✅ |
-| | 添加排班 | POST `/api/visits` | ✅ | ✅ |
-| | 删除排班 | DELETE `/api/visits/:id` | ✅ | ✅ |
+| | 添加排班 | POST `/api/visits` | ✅ | ✅ (仅允许创建 expert_name=本人) |
+| | 更新排班 | PUT `/api/visits/:id` | ✅ | ✅ (仅允许更新本人排班) |
+| | 删除排班 | DELETE `/api/visits/:id` | ✅ | ✅ (仅允许删除本人排班) |
 
 ### 字段级权限 (PUT /api/stores/:id)
 - **管理员**: 可编辑 `name`, `brand`, `city`, `assignedExpert`, `monthlyFrequency`, `specialRequirements`, `importStatus`。
-- **普通用户**: 仅可编辑 `assignedExpert` (负责专家), `monthlyFrequency` (服务频次), `specialRequirements` (特殊需求)。其他字段若提交将被忽略。
+- **普通用户**: 仅可编辑 `assignedExpert` (负责专家), `monthlyFrequency` (服务频次)。其他字段若提交将被忽略。
 
 ### 认证 (Auth)
 | 接口名 | 方法 | 路径 | 权限 | 说明 |
@@ -152,9 +175,14 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 | 获取门店 | GET | `/api/stores` | User/Admin | 返回所有门店列表 |
 | 更新门店 | PUT | `/api/stores/:id` | User/Admin | 单个更新门店 (User 仅限部分字段) |
 | 批量更新门店 | POST | `/api/stores/batch` | Admin | 批量插入或更新门店 (8列数据，含导入状态) |
-| 删除门店 | DELETE | `/api/stores/:id` | Admin | 删除门店及其关联排班 |
+| 停用门店 | DELETE | `/api/stores/:id` | Admin | 停用门店；存在未来 planned 时阻止停用 |
+| 恢复门店 | POST | `/api/stores/:id/restore` | Admin | 恢复已停用门店 |
+| 获取门店月度计划 | GET | `/api/store-month-plans?month=YYYY-MM` | User/Admin | 获取某月所有门店目标次数覆盖 |
+| 设置门店月度计划 | PUT | `/api/stores/:id/month-plan` | Admin | 设置指定门店在某月的目标次数 |
+| 清除门店月度计划 | DELETE | `/api/stores/:id/month-plan?month=YYYY-MM` | Admin | 清除指定门店在某月的目标次数覆盖 |
 | 获取排班 | GET | `/api/visits` | User/Admin | 获取排班记录 |
 | 添加排班 | POST | `/api/visits` | User/Admin | 创建新的访问记录 |
+| 更新排班 | PUT | `/api/visits/:id` | User/Admin | 更新日期/状态/原因/计入规则（User 仅限本人） |
 | 删除排班 | DELETE | `/api/visits/:id` | User/Admin | 删除指定的排班记录 |
 | 获取专家列表 | GET | `/api/experts` | User/Admin | 返回所有有效用户的姓名列表 |
 
