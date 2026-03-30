@@ -69,6 +69,13 @@ sudo systemctl start nginx
    npm install
    npm run build
    cd ..
+
+   # 安装终端监测报告工具依赖（Streamlit）
+   cd reporttowuye
+   python3 -m venv .venv
+   ./.venv/bin/pip install --upgrade pip
+   ./.venv/bin/pip install -r requirements.txt
+   cd ..
    ```
 
 ## 第四步：配置 Nginx
@@ -85,6 +92,20 @@ sudo systemctl start nginx
    server {
        listen 80;
        server_name zeosite.com www.zeosite.com;
+
+       client_max_body_size 10m;
+
+       location /workspace/terminal-report/ {
+           proxy_pass http://127.0.0.1:8501;
+           proxy_http_version 1.1;
+           proxy_set_header Upgrade $http_upgrade;
+           proxy_set_header Connection 'upgrade';
+           proxy_set_header Host $host;
+           proxy_cache_bypass $http_upgrade;
+           proxy_set_header X-Real-IP $remote_addr;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+       }
 
        location / {
            proxy_pass http://localhost:3000;
@@ -115,6 +136,9 @@ sudo systemctl start nginx
 # 在 /var/www/zeosite 目录下
 pm2 start server.js --name "zeosite-api"
 
+# 终端监测报告工具（Streamlit，部署在 /workspace/terminal-report/）
+pm2 start "./.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501 --server.baseUrlPath workspace/terminal-report --server.maxUploadSize 10 --server.headless true" --name "zeosite-terminal-report" --cwd /var/www/zeosite/reporttowuye
+
 # 保存当前进程列表，以便开机自启
 pm2 save
 pm2 startup
@@ -138,5 +162,8 @@ cd /var/www/zeosite
 git pull
 npm install  # 如果依赖有变更
 cd service-mate && npm install && npm run build && cd ..
+cd reporttowuye && ./.venv/bin/pip install -r requirements.txt && cd ..
+sudo cp deployment/nginx.conf /etc/nginx/sites-available/zeosite && sudo nginx -t && sudo systemctl reload nginx
 pm2 restart zeosite-api
+pm2 restart zeosite-terminal-report || pm2 start "./.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501 --server.baseUrlPath workspace/terminal-report --server.maxUploadSize 10 --server.headless true" --name "zeosite-terminal-report" --cwd /var/www/zeosite/reporttowuye
 ```

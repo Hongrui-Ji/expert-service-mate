@@ -49,6 +49,13 @@ npm install
 npm run build
 cd ..
 
+echo "部署终端监测报告工具 (Streamlit)..."
+cd reporttowuye
+python3 -m venv .venv
+./.venv/bin/pip install --upgrade pip
+./.venv/bin/pip install -r requirements.txt
+cd ..
+
 # 5. 配置 Nginx
 echo "配置 Nginx..."
 sudo cp deployment/nginx.conf "$NGINX_CONF"
@@ -59,6 +66,10 @@ sudo nginx -t && sudo systemctl reload nginx
 echo "启动 Node 服务..."
 pm2 delete zeosite-api 2>/dev/null || true
 pm2 start server.js --name "zeosite-api"
+
+echo "启动终端监测报告服务..."
+pm2 delete zeosite-terminal-report 2>/dev/null || true
+pm2 start "./.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501 --server.baseUrlPath workspace/terminal-report --server.maxUploadSize 10 --server.headless true" --name "zeosite-terminal-report" --cwd "$APP_DIR/reporttowuye"
 pm2 save
 
 echo "=== 部署完成！ ==="

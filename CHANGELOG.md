@@ -67,3 +67,6 @@
 - 停用策略 A：
   - 门店存在未来 planned 时，停用被阻止并提示原因
   - 取消/改期后可停用；停用后不可新建排班/临时上门；可恢复
+
+### 模块上线
+- 工作台 Module2 “终端监测报告”上线：入口 `/workspace/terminal-report/`，使用 Streamlit 生成并下载 PDF 报告；Nginx 配置上传总大小限制 10MB

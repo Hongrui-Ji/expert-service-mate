@@ -7,7 +7,7 @@ set -e
 
 echo "开始安装系统依赖..."
 sudo apt update
-sudo apt install -y curl git nginx build-essential python3
+sudo apt install -y curl git nginx build-essential python3 python3-venv python3-pip
 
 # 安装 Node.js (v20)
 echo "安装 Node.js..."
