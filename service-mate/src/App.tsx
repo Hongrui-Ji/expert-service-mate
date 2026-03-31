@@ -267,6 +267,7 @@ export default function App() {
   const [adminFilterProvince, setAdminFilterProvince] = useState<string[]>(['全部']);
   const [adminFilterExpert, setAdminFilterExpert] = useState<string[]>(['全部']);
   const [adminFilterImportStatus, setAdminFilterImportStatus] = useState('否'); // 默认显示未导入门店
+  const [showArchivedStores, setShowArchivedStores] = useState(false);
   const [adminFilterSpecialRequirements, setAdminFilterSpecialRequirements] = useState<'全部' | '有' | '无'>('全部');
   const [adminSearchTerm, setAdminSearchTerm] = useState('');
   const [monthPlansMonth, setMonthPlansMonth] = useState('');
@@ -663,8 +664,13 @@ export default function App() {
   };
 
   // [修改] 实现筛选属性的拼音排序和级联联动
+  const adminBaseStores = useMemo(() => {
+    if (user?.role === 'admin' && showArchivedStores) return stores;
+    return stores.filter(s => !s.deletedAt);
+  }, [stores, user, showArchivedStores]);
+
   const uniqueProvinces = useMemo(() => {
-    const filtered = getFilteredStores(stores, {
+    const filtered = getFilteredStores(adminBaseStores, {
       importStatus: adminFilterImportStatus,
       specialRequirements: adminFilterSpecialRequirements,
       province: ['全部'],
@@ -674,10 +680,10 @@ export default function App() {
     });
     const provinces = Array.from(new Set(filtered.map(s => s.province))).filter(p => typeof p === 'string' && p.trim() !== '');
     return ['全部', ...provinces.sort((a, b) => a.localeCompare(b, 'zh-CN'))];
-  }, [stores, adminFilterImportStatus, adminFilterSpecialRequirements, adminFilterCity, adminFilterBrand, adminFilterExpert]);
+  }, [adminBaseStores, adminFilterImportStatus, adminFilterSpecialRequirements, adminFilterCity, adminFilterBrand, adminFilterExpert]);
 
   const uniqueCities = useMemo(() => {
-    const filtered = getFilteredStores(stores, {
+    const filtered = getFilteredStores(adminBaseStores, {
       importStatus: adminFilterImportStatus,
       specialRequirements: adminFilterSpecialRequirements,
       province: adminFilterProvince,
@@ -687,10 +693,10 @@ export default function App() {
     });
     const cities = Array.from(new Set(filtered.map(s => s.city))).filter(c => typeof c === 'string' && c.trim() !== '');
     return ['全部', ...cities.sort((a, b) => a.localeCompare(b, 'zh-CN'))];
-  }, [stores, adminFilterImportStatus, adminFilterSpecialRequirements, adminFilterProvince, adminFilterBrand, adminFilterExpert]);
+  }, [adminBaseStores, adminFilterImportStatus, adminFilterSpecialRequirements, adminFilterProvince, adminFilterBrand, adminFilterExpert]);
 
   const uniqueBrands = useMemo(() => {
-    const filtered = getFilteredStores(stores, {
+    const filtered = getFilteredStores(adminBaseStores, {
       importStatus: adminFilterImportStatus,
       specialRequirements: adminFilterSpecialRequirements,
       province: adminFilterProvince,
@@ -700,7 +706,7 @@ export default function App() {
     });
     const brands = Array.from(new Set(filtered.map(s => s.brand))).filter(b => typeof b === 'string' && b.trim() !== '');
     return ['全部', ...brands.sort((a, b) => a.localeCompare(b, 'zh-CN'))];
-  }, [stores, adminFilterImportStatus, adminFilterSpecialRequirements, adminFilterProvince, adminFilterCity, adminFilterExpert]);
+  }, [adminBaseStores, adminFilterImportStatus, adminFilterSpecialRequirements, adminFilterProvince, adminFilterCity, adminFilterExpert]);
 
   const sortedExperts = useMemo(() => {
     // 过滤非字符串数据，防止 localeCompare 报错
@@ -708,7 +714,7 @@ export default function App() {
   }, [experts]);
 
   const filterOptionsExperts = useMemo(() => {
-    const filtered = getFilteredStores(stores, {
+    const filtered = getFilteredStores(adminBaseStores, {
       importStatus: adminFilterImportStatus,
       specialRequirements: adminFilterSpecialRequirements,
       province: adminFilterProvince,
@@ -732,7 +738,7 @@ export default function App() {
     const options = ['全部'];
     if (hasUnassigned) options.push('待分配');
     return [...options, ...validExperts];
-  }, [stores, adminFilterImportStatus, adminFilterSpecialRequirements, adminFilterProvince, adminFilterCity, adminFilterBrand, sortedExperts]);
+  }, [adminBaseStores, adminFilterImportStatus, adminFilterSpecialRequirements, adminFilterProvince, adminFilterCity, adminFilterBrand, sortedExperts]);
 
   // [修改] 当联动筛选导致当前选中项无效时，自动重置
   useEffect(() => {
@@ -759,7 +765,7 @@ export default function App() {
   }, [uniqueProvinces, uniqueCities, uniqueBrands, filterOptionsExperts, adminFilterProvince, adminFilterCity, adminFilterBrand, adminFilterExpert]);
 
   const filteredStores = useMemo(() => {
-    return getFilteredStores(stores, {
+    return getFilteredStores(adminBaseStores, {
       importStatus: adminFilterImportStatus,
       specialRequirements: adminFilterSpecialRequirements,
       province: adminFilterProvince,
@@ -771,7 +777,7 @@ export default function App() {
       const matchSearch = store.name.toLowerCase().includes(searchLower) || store.id.toLowerCase().includes(searchLower);
       return matchSearch;
     });
-  }, [stores, adminFilterProvince, adminFilterCity, adminFilterBrand, adminFilterExpert, adminFilterImportStatus, adminFilterSpecialRequirements, adminSearchTerm]);
+  }, [adminBaseStores, adminFilterProvince, adminFilterCity, adminFilterBrand, adminFilterExpert, adminFilterImportStatus, adminFilterSpecialRequirements, adminSearchTerm]);
 
   // 批量/单选 门店
   const toggleStoreSelection = (storeId: string) => {
@@ -1070,8 +1076,8 @@ export default function App() {
   };
 
   const handleExport = () => {
-    let csvContent = "\ufeff门店ID,门店名称,品牌,省份,城市,负责专家,服务频次,特殊需求,导入状态\n";
-    stores.forEach(store => {
+    let csvContent = "\ufeff门店ID,门店名称,品牌,省份,城市,负责专家,服务频次,特殊需求,导入状态,归档状态\n";
+    filteredStores.forEach(store => {
       const row = [
         store.id, 
         store.name, 
@@ -1081,7 +1087,8 @@ export default function App() {
         store.assignedExpert || '', 
         store.monthlyFrequency, 
         store.specialRequirements || '',
-        store.importStatus || ''
+        store.importStatus || '',
+        store.deletedAt ? '是' : '否'
       ].map(field => `"${field}"`).join(",");
       csvContent += row + "\n";
     });
@@ -1722,6 +1729,14 @@ export default function App() {
                         className="text-xs text-red-500 hover:underline"
                       >
                         清空筛选
+                      </button>
+                    )}
+                    {user.role === 'admin' && (
+                      <button
+                        onClick={() => setShowArchivedStores(v => !v)}
+                        className={`flex items-center gap-2 bg-white border px-3 py-1.5 rounded-lg text-sm ${showArchivedStores ? 'border-indigo-300 text-indigo-700' : 'border-gray-300 text-gray-700'}`}
+                      >
+                        {showArchivedStores ? '隐藏归档' : '显示归档'}
                       </button>
                     )}
                     <button onClick={handleExport} className="flex items-center gap-2 bg-white border border-gray-300 px-3 py-1.5 rounded-lg text-sm"><Download size={16}/> 导出</button>

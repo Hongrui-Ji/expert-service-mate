@@ -155,15 +155,46 @@ pm2 startup
 
 ## 后续更新部署
 
-当你推送了新代码到 GitHub 后，在服务器上只需执行：
+当你推送了新代码到 GitHub 后，不需要每次都执行全部命令。推荐按“改动范围”选择对应的更新流程。
+
+### 场景 A：只更新排班系统/工作台页面（最常见）
+适用：只改了 `server.js`、`landing_page/`、`service-mate/` 这类 Node/前端代码；没有改 `deployment/nginx.conf`、没有改 `reporttowuye/requirements.txt`。
 
 ```bash
 cd /var/www/zeosite
 git pull
-npm install  # 如果依赖有变更
+
+npm install
 cd service-mate && npm install && npm run build && cd ..
-cd reporttowuye && ./.venv/bin/pip install -r requirements.txt && cd ..
-sudo cp deployment/nginx.conf /etc/nginx/sites-available/zeosite && sudo nginx -t && sudo systemctl reload nginx
+
 pm2 restart zeosite-api
-pm2 restart zeosite-terminal-report || pm2 start "./.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501 --server.baseUrlPath workspace/terminal-report --server.maxUploadSize 10 --server.headless true" --name "zeosite-terminal-report" --cwd /var/www/zeosite/reporttowuye
 ```
+
+### 场景 B：更新终端监测报告（Streamlit / Module2）
+适用：改了 `reporttowuye/app.py` 或 `reporttowuye/requirements.txt`。
+
+```bash
+cd /var/www/zeosite
+git pull
+
+cd reporttowuye && ./.venv/bin/pip install -r requirements.txt && cd ..
+
+pm2 restart zeosite-terminal-report
+```
+
+### 场景 C：更新 Nginx 配置（路由/上传限制/超时等）
+适用：改了 `deployment/nginx.conf`（例如新增反代路径、修改 `client_max_body_size`）。
+
+```bash
+cd /var/www/zeosite
+git pull
+
+sudo cp deployment/nginx.conf /etc/nginx/sites-available/zeosite
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+### 场景 D：一次更新同时包含多个部分
+按顺序依次执行对应场景即可；通常建议顺序：
+- 先 `git pull`
+- 再构建前端 / 安装依赖
+- 最后 reload Nginx / restart PM2
