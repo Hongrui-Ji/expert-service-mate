@@ -107,6 +107,13 @@ interface ToastMsg {
   type: 'success' | 'error' | 'info';
 }
 
+interface ExportCalendarCell {
+  date: Date;
+  dateStr: string;
+  isCurrentMonth: boolean;
+  visits: Visit[];
+}
+
 interface MultiSelectProps {
   label: string;
   options: string[];
@@ -243,6 +250,7 @@ export default function App() {
   const [dragging, setDragging] = useState<{ kind: 'store' | 'visit'; id: string } | null>(null);
   const [dragHoverDate, setDragHoverDate] = useState<string | null>(null);
   const [dropFlashDate, setDropFlashDate] = useState<string | null>(null);
+  const [isExportingSchedule, setIsExportingSchedule] = useState(false);
   const [touchDrag, setTouchDrag] = useState<{
     visitId: string;
     label: string;
@@ -291,6 +299,13 @@ export default function App() {
     return `${year}-${String(month + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
   };
   const formatMonthKey = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+  const weekdayLabelsMondayFirst = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+  const getWeekdayIndexMondayFirst = (date: Date) => (date.getDay() + 6) % 7;
+  const sanitizeFileName = (value: string) => value.replace(/[\\/:*?"<>|]/g, '_');
+  const formatWeekdayLabel = (dateStr: string) => {
+    const date = new Date(`${dateStr}T00:00:00`);
+    return weekdayLabelsMondayFirst[getWeekdayIndexMondayFirst(date)];
+  };
 
   const getStartOfWeek = (date: Date) => {
     const d = new Date(date);
@@ -621,6 +636,16 @@ export default function App() {
     return formatMonthKey(currentDate) < formatMonthKey(new Date());
   }, [currentDate]);
 
+  const exportMonthVisits = useMemo(() => {
+    const monthKey = formatMonthKey(currentDate);
+    return visits
+      .filter(v => v.expertName === currentUser && v.date.startsWith(monthKey))
+      .sort((a, b) => {
+        if (a.date !== b.date) return a.date.localeCompare(b.date);
+        return a.storeId.localeCompare(b.storeId);
+      });
+  }, [visits, currentDate, currentUser]);
+
   // 辅助函数：根据条件筛选门店
   const getFilteredStores = (
     baseStores: Store[], 
@@ -816,6 +841,207 @@ export default function App() {
     } catch (e) {
       console.error(e);
       showToast('部分任务添加失败，请刷新重试', 'error');
+    }
+  };
+
+  const buildExportCalendarRows = (date: Date, monthVisits: Visit[]): ExportCalendarCell[][] => {
+    const year = date.getFullYear();
+    const month = date.getMonth();
+    const firstOfMonth = new Date(year, month, 1);
+    const lastOfMonth = new Date(year, month + 1, 0);
+    const offset = getWeekdayIndexMondayFirst(firstOfMonth);
+    const totalCells = Math.ceil((offset + lastOfMonth.getDate()) / 7) * 7;
+    const startDate = new Date(firstOfMonth);
+    startDate.setDate(firstOfMonth.getDate() - offset);
+    const visitMap = new Map<string, Visit[]>();
+
+    monthVisits.forEach(visit => {
+      const list = visitMap.get(visit.date) || [];
+      list.push(visit);
+      visitMap.set(visit.date, list);
+    });
+
+    const rows: ExportCalendarCell[][] = [];
+    for (let index = 0; index < totalCells; index += 7) {
+      const row: ExportCalendarCell[] = [];
+      for (let dayIndex = 0; dayIndex < 7; dayIndex += 1) {
+        const cellDate = new Date(startDate);
+        cellDate.setDate(startDate.getDate() + index + dayIndex);
+        const dateStr = formatDate(cellDate);
+        row.push({
+          date: cellDate,
+          dateStr,
+          isCurrentMonth: cellDate.getMonth() === month,
+          visits: (visitMap.get(dateStr) || []).slice().sort((a, b) => a.storeId.localeCompare(b.storeId))
+        });
+      }
+      rows.push(row);
+    }
+    return rows;
+  };
+
+  const handleExportScheduleExcel = async () => {
+    if (user?.role !== 'admin') return;
+    if (!currentUser) {
+      showToast('请先选择专家', 'error');
+      return;
+    }
+
+    setIsExportingSchedule(true);
+    try {
+      const monthKey = formatMonthKey(currentDate);
+      const ExcelJS = await import('exceljs');
+      const workbook = new ExcelJS.Workbook();
+      const calendarSheet = workbook.addWorksheet('月历视图', {
+        views: [{ state: 'frozen', ySplit: 4 }]
+      });
+      const detailSheet = workbook.addWorksheet('排班明细', {
+        views: [{ state: 'frozen', ySplit: 1 }]
+      });
+      const storesById = new Map(stores.map(store => [store.id, store]));
+      const calendarRows = buildExportCalendarRows(currentDate, exportMonthVisits);
+      const title = `${monthKey} 专家排班表 - ${currentUser}`;
+
+      calendarSheet.mergeCells('A1:G1');
+      calendarSheet.getCell('A1').value = title;
+      calendarSheet.getCell('A1').font = { size: 16, bold: true };
+      calendarSheet.getCell('A1').alignment = { horizontal: 'center', vertical: 'middle' };
+      calendarSheet.getRow(1).height = 24;
+
+      calendarSheet.mergeCells('A2:G2');
+      calendarSheet.getCell('A2').value = `导出人：${user.name}    导出时间：${new Date().toLocaleString('zh-CN')}    视图口径：周一到周日`;
+      calendarSheet.getCell('A2').font = { size: 10, color: { argb: 'FF6B7280' } };
+      calendarSheet.getCell('A2').alignment = { horizontal: 'left', vertical: 'middle' };
+      calendarSheet.getRow(2).height = 20;
+
+      calendarSheet.columns = weekdayLabelsMondayFirst.map(() => ({ width: 24 }));
+      const headerRow = calendarSheet.getRow(4);
+      weekdayLabelsMondayFirst.forEach((label, index) => {
+        const cell = headerRow.getCell(index + 1);
+        cell.value = label;
+        cell.font = { bold: true, color: { argb: 'FF1F2937' } };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        cell.fill = {
+          type: 'pattern',
+          pattern: 'solid',
+          fgColor: { argb: 'FFE5E7EB' }
+        };
+        cell.border = {
+          top: { style: 'thin', color: { argb: 'FFD1D5DB' } },
+          left: { style: 'thin', color: { argb: 'FFD1D5DB' } },
+          bottom: { style: 'thin', color: { argb: 'FFD1D5DB' } },
+          right: { style: 'thin', color: { argb: 'FFD1D5DB' } }
+        };
+      });
+      headerRow.height = 22;
+
+      calendarRows.forEach((week, weekIndex) => {
+        const rowNumber = 5 + weekIndex;
+        const row = calendarSheet.getRow(rowNumber);
+        const maxVisitCount = Math.max(...week.map(day => day.visits.length), 0);
+        row.height = Math.max(88, 28 + maxVisitCount * 18);
+
+        week.forEach((day, dayIndex) => {
+          const storeLines = day.visits.map(visit => {
+            const store = storesById.get(visit.storeId);
+            const name = store?.name || visit.storeId;
+            const city = store?.city ? `（${store.city}）` : '';
+            const prefix = visit.type === 'extra' ? '临时：' : '';
+            const reason = visit.type === 'extra' && visit.title ? ` - ${visit.title}` : '';
+            return `${prefix}${name}${city}${reason}`;
+          });
+          const cell = row.getCell(dayIndex + 1);
+          cell.value = storeLines.length > 0
+            ? `${day.date.getDate()}\n${storeLines.join('\n')}`
+            : `${day.date.getDate()}`;
+          cell.alignment = { vertical: 'top', horizontal: 'left', wrapText: true };
+          cell.font = {
+            size: 10,
+            color: { argb: day.isCurrentMonth ? 'FF111827' : 'FF9CA3AF' }
+          };
+          cell.fill = {
+            type: 'pattern',
+            pattern: 'solid',
+            fgColor: { argb: day.isCurrentMonth ? 'FFFFFFFF' : 'FFF3F4F6' }
+          };
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+            left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+            bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+            right: { style: 'thin', color: { argb: 'FFE5E7EB' } }
+          };
+        });
+      });
+
+      detailSheet.columns = [
+        { header: '日期', key: 'date', width: 14 },
+        { header: '星期', key: 'weekday', width: 10 },
+        { header: '门店ID', key: 'storeId', width: 16 },
+        { header: '门店名称', key: 'storeName', width: 22 },
+        { header: '品牌', key: 'brand', width: 16 },
+        { header: '城市', key: 'city', width: 12 },
+        { header: '专家', key: 'expertName', width: 12 },
+        { header: '类型', key: 'type', width: 12 },
+        { header: '状态', key: 'status', width: 12 },
+        { header: '是否计入目标', key: 'countTowardsTarget', width: 14 },
+        { header: '临时原因', key: 'title', width: 28 }
+      ];
+
+      const detailHeader = detailSheet.getRow(1);
+      detailHeader.font = { bold: true, color: { argb: 'FF1F2937' } };
+      detailHeader.alignment = { horizontal: 'center', vertical: 'middle' };
+      detailHeader.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFE5E7EB' }
+      };
+
+      exportMonthVisits.forEach(visit => {
+        const store = storesById.get(visit.storeId);
+        detailSheet.addRow({
+          date: visit.date,
+          weekday: formatWeekdayLabel(visit.date),
+          storeId: visit.storeId,
+          storeName: store?.name || '',
+          brand: store?.brand || '',
+          city: store?.city || '',
+          expertName: visit.expertName,
+          type: visit.type === 'extra' ? '临时上门' : '常规排班',
+          status: visit.status === 'completed' ? '已完成' : '待执行',
+          countTowardsTarget: visit.countTowardsTarget === false ? '否' : '是',
+          title: visit.title || ''
+        });
+      });
+
+      detailSheet.eachRow((row, rowNumber) => {
+        row.eachCell(cell => {
+          cell.alignment = { vertical: 'middle', horizontal: rowNumber === 1 ? 'center' : 'left', wrapText: true };
+          cell.border = {
+            top: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+            left: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+            bottom: { style: 'thin', color: { argb: 'FFE5E7EB' } },
+            right: { style: 'thin', color: { argb: 'FFE5E7EB' } }
+          };
+        });
+      });
+
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = sanitizeFileName(`排班表_${currentUser}_${monthKey}.xlsx`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+      showToast('Excel 导出开始', 'success');
+    } catch (e) {
+      showToast(`导出失败：${e instanceof Error ? e.message : String(e)}`, 'error');
+    } finally {
+      setIsExportingSchedule(false);
     }
   };
 
@@ -1971,6 +2197,16 @@ export default function App() {
                     <button onClick={() => openExtraVisitModal()} className="flex items-center gap-1 px-3 py-2 rounded-lg text-sm font-medium bg-orange-50 text-orange-700 hover:bg-orange-100 transition">
                       <Plus size={14}/> 临时上门
                     </button>
+                    {user.role === 'admin' && (
+                      <button
+                        onClick={() => { void handleExportScheduleExcel(); }}
+                        disabled={!currentUser || isExportingSchedule}
+                        className="flex items-center gap-1 px-3 py-2 rounded-lg text-sm font-medium bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <Download size={14}/>
+                        {isExportingSchedule ? '导出中...' : '导出当月 Excel'}
+                      </button>
+                    )}
                     <div className="flex bg-gray-100 p-1 rounded-lg flex-shrink-0">
                       <button onClick={() => { setViewMode('month'); setShowDetailsModal(false); }} className={`flex items-center gap-1 px-3 py-2 rounded-md text-sm font-medium transition ${viewMode === 'month' ? 'bg-white text-blue-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
                         <Grid3X3 size={14}/> 月

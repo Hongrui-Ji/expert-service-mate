@@ -10,6 +10,7 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 - **编程语言**: TypeScript
 - **样式**: Tailwind CSS
 - **图标**: Lucide React
+- **导出能力**: ExcelJS（用于管理员导出排班月历 Excel）
 - **状态管理**: React Hooks (useState, useMemo, useEffect, useCallback)
 
 ### 后端 (server.js)
@@ -51,6 +52,8 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
   - 支持月视图和周视图切换。
   - 必须选择特定专家查看其排班记录（不再支持“全部专家”视图）。
   - 支持批量添加未安排门店。
+  - 管理员可将“当前选中专家 + 当前月份”的排班表导出为 Excel。
+  - 导出文件包含 `月历视图`、`排班明细` 两个 Sheet；月历视图按“周一到周日”排列。
 - **数据管理 (Admin Tab)**:
   - **账号管理**: 管理员可创建/编辑/禁用用户账号 (专家)。
   - **门店管理**: 门店库 CRUD 操作。
@@ -76,6 +79,7 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
    - 用户登录后获取 JWT Token，后续请求自动携带 Bearer Token。
    - 管理员在“账号管理”中创建用户，后端写入 `users` 表。
    - 用户在管理页导入数据，发送 `POST /api/stores/batch` 请求。
+   - 管理员可在排班页基于当前已加载的 `stores`、`visits` 数据直接生成 Excel，无需新增后端导出接口。
 3. **数据同步**: 后端接收请求，执行 SQL 更新数据库，返回结果。前端收到成功响应后，通过 `fetchAllData` 或局部状态更新同步 UI。
 
 ## 6. 数据库设计 (Schema)
@@ -152,6 +156,7 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 | | 添加排班 | POST `/api/visits` | ✅ | ✅ (仅允许创建 expert_name=本人) |
 | | 更新排班 | PUT `/api/visits/:id` | ✅ | ✅ (仅允许更新本人排班) |
 | | 删除排班 | DELETE `/api/visits/:id` | ✅ | ✅ (仅允许删除本人排班) |
+| | 导出当月排班 Excel | 前端本地生成 | ✅ | ⛔ 不显示 |
 
 ### 字段级权限 (PUT /api/stores/:id)
 - **管理员**: 可编辑 `name`, `brand`, `city`, `assignedExpert`, `monthlyFrequency`, `specialRequirements`, `importStatus`。
@@ -185,6 +190,7 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 | 更新排班 | PUT | `/api/visits/:id` | User/Admin | 更新日期/状态/原因/计入规则（User 仅限本人） |
 | 删除排班 | DELETE | `/api/visits/:id` | User/Admin | 删除指定的排班记录 |
 | 获取专家列表 | GET | `/api/experts` | User/Admin | 返回所有有效用户的姓名列表 |
+| 导出当月排班 Excel | 前端动作 | Admin | 基于当前选中专家与当前月份生成 `.xlsx`，包含月历视图与排班明细 |
 
 ## 8. 部署架构
 - **前端部署**: 构建后的静态文件 (通常是 `service-mate/dist/`) 可由 Nginx 或静态托管服务部署。
