@@ -17,8 +17,6 @@ import {
   Trash2,
   Edit2,
   Search,
-  UserPlus,
-  UserMinus,
   Clock,
   Tag,
   Loader2,
@@ -39,6 +37,10 @@ import './index.css';
 const API_BASE = (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'))
   ? 'http://localhost:3000/api'
   : '/api';
+
+const WORKSPACE_URL = (typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'))
+  ? 'http://localhost:3000/workspace'
+  : '/workspace';
 
 const getJwtExp = (token: string): number | null => {
   const parts = token.split('.');
@@ -62,15 +64,6 @@ interface User {
   phone: string;
   role: 'admin' | 'user';
   token: string;
-}
-
-interface ManagedUser {
-  id: number;
-  name: string;
-  phone: string;
-  role: string;
-  status: number;
-  created_at: string;
 }
 
 interface Store {
@@ -224,12 +217,6 @@ export default function App() {
       return null;
     }
   });
-  const [authFormData, setAuthFormData] = useState({ phone: '', password: '' });
-  
-  // 管理员账号管理状态
-  const [managedUsers, setManagedUsers] = useState<ManagedUser[]>([]);
-  const [showUserModal, setShowUserModal] = useState(false);
-  const [editingUser, setEditingUser] = useState<Partial<ManagedUser & { password?: string }> | null>(null);
 
   // 数据状态
   const [experts, setExperts] = useState<string[]>([]);
@@ -336,29 +323,11 @@ export default function App() {
     showToast('登录已过期，请重新登录', 'info');
   }, [showToast]);
 
-  // --- Auth 逻辑 ---
-  const handleAuth = async (e: React.FormEvent) => {
-    e.preventDefault();
-    try {
-      const res = await fetch(`${API_BASE}/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(authFormData)
-      });
-      const data = await res.json();
-      if (res.ok) {
-        const authUser = { ...data.user, token: data.token };
-        setUser(authUser);
-        setCurrentUser(authUser.name);
-        localStorage.setItem('auth_user', JSON.stringify(authUser));
-        showToast('登录成功', 'success');
-      } else {
-        showToast(data.error || '手机号或密码错误', 'error');
-      }
-    } catch (err) {
-      showToast('网络错误', 'error');
+  useEffect(() => {
+    if (!user) {
+      window.location.replace(WORKSPACE_URL);
     }
-  };
+  }, [user]);
 
   const handleLogout = () => {
     setUser(null);
@@ -390,55 +359,6 @@ export default function App() {
     }
     return res;
   }, [user, handleSessionExpired]);
-
-  // --- 管理员账号管理逻辑 ---
-  const fetchManagedUsers = useCallback(async () => {
-    if (user?.role !== 'admin') return;
-    try {
-      const res = await authenticatedFetch(`${API_BASE}/admin/users`);
-      if (res.ok) {
-        const data = await res.json();
-        setManagedUsers(data);
-      }
-    } catch (err) { console.error(err); }
-  }, [user, authenticatedFetch]);
-
-  const handleSaveManagedUser = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editingUser) return;
-    
-    // 校验逻辑
-    if (editingUser.name && (editingUser.name.length < 2 || editingUser.name.length > 20)) {
-      return showToast('姓名需在2-20字符之间', 'error');
-    }
-    if (editingUser.phone && !/^1[3-9]\d{9}$/.test(editingUser.phone)) {
-      return showToast('手机号格式错误', 'error');
-    }
-    if (editingUser.password && !/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/.test(editingUser.password)) {
-      return showToast('密码需8位以上，包含大小写字母和数字', 'error');
-    }
-
-    const isNew = !editingUser.id;
-    const url = isNew ? `${API_BASE}/admin/users` : `${API_BASE}/admin/users/${editingUser.id}`;
-    const method = isNew ? 'POST' : 'PUT';
-
-    try {
-      const res = await authenticatedFetch(url, {
-        method,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(editingUser)
-      });
-      if (res.ok) {
-        showToast(isNew ? '创建成功' : '更新成功', 'success');
-        setShowUserModal(false);
-        setEditingUser(null);
-        fetchManagedUsers();
-      } else {
-        const data = await res.json();
-        showToast(data.error || '保存失败', 'error');
-      }
-    } catch (err) { showToast('保存出错', 'error'); }
-  };
 
   const fetchAllData = useCallback(async (silent = false) => {
     if (!user) return;
@@ -497,9 +417,8 @@ export default function App() {
   useEffect(() => {
     if (user) {
       fetchAllData();
-      if (user.role === 'admin') fetchManagedUsers();
     }
-  }, [user, fetchAllData, fetchManagedUsers]);
+  }, [user, fetchAllData]);
 
   useEffect(() => {
     if (!user) return;
@@ -591,7 +510,7 @@ export default function App() {
     }
   };
 
-  // 专家管理逻辑已移除，由账号管理统一接管
+  // 专家列表由工作台账号中心统一维护
 
   // [修改] 仅显示未导入的门店用于排班
   const schedulableStores = useMemo(() => {
@@ -1715,62 +1634,13 @@ export default function App() {
     return <div className="flex flex-col bg-white pb-6">{weekRows}</div>;
   };
 
-  // --- 登录 视图 ---
   if (!user) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
-        <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-md">
-          <div className="flex flex-col items-center mb-8">
-            <div className="bg-blue-600 p-3 rounded-2xl text-white mb-4 shadow-lg shadow-blue-200">
-              <Calendar size={32} />
-            </div>
-            <h1 className="text-2xl font-bold text-gray-900">ServiceMate</h1>
-            <p className="text-gray-500 text-sm mt-1">管理员预置账号登录</p>
-          </div>
-
-          <form onSubmit={handleAuth} className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">手机号</label>
-              <input 
-                type="tel" 
-                required 
-                placeholder="11位手机号"
-                className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition"
-                value={authFormData.phone}
-                onChange={e => setAuthFormData({...authFormData, phone: e.target.value})}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">密码</label>
-              <input 
-                type="password" 
-                required 
-                placeholder="请输入密码"
-                className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition"
-                value={authFormData.password}
-                onChange={e => setAuthFormData({...authFormData, password: e.target.value})}
-              />
-            </div>
-            <button 
-              type="submit" 
-              className="w-full bg-blue-600 text-white py-3 rounded-xl font-bold hover:bg-blue-700 shadow-lg shadow-blue-200 transition transform active:scale-[0.98]"
-            >
-              登录
-            </button>
-          </form>
-
-          <div className="mt-6 text-center text-xs text-gray-400">
-            <p>未获得账号？请联系系统管理员</p>
-          </div>
-        </div>
-        {/* Toast 集成 */}
-        <div className="fixed top-4 right-4 z-[60] flex flex-col gap-2 pointer-events-none">
-          {toasts.map(toast => (
-            <div key={toast.id} className={`pointer-events-auto flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg text-sm font-medium animate-in slide-in-from-right fade-in duration-300 ${toast.type === 'success' ? 'bg-green-600 text-white' : toast.type === 'error' ? 'bg-red-600 text-white' : 'bg-gray-800 text-white'}`}>
-              {toast.type === 'success' ? <CheckCircle2 size={16}/> : toast.type === 'error' ? <AlertCircle size={16}/> : <Info size={16}/>}
-              {toast.message}
-            </div>
-          ))}
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 flex-col gap-4 p-4 text-center">
+        <Loader2 className="animate-spin text-blue-600" size={40} />
+        <div>
+          <p className="text-gray-700 font-medium">正在返回工作台登录</p>
+          <a href={WORKSPACE_URL} className="text-sm text-blue-600 hover:underline mt-2 inline-block">打开工作台</a>
         </div>
       </div>
     );
@@ -1801,7 +1671,7 @@ export default function App() {
       <nav className="bg-white border-b border-gray-200 px-4 py-3 sticky top-0 z-20 shadow-sm">
         <div className="max-w-7xl mx-auto flex justify-between items-center">
           <div className="flex items-center gap-2">
-            <a href="/workspace" className="hidden sm:flex items-center gap-1 text-gray-500 hover:text-blue-600 transition mr-2" title="返回工作台">
+            <a href={WORKSPACE_URL} className="hidden sm:flex items-center gap-1 text-gray-500 hover:text-blue-600 transition mr-2" title="返回工作台">
               <ChevronLeft size={20} />
             </a>
             <div className="bg-blue-600 p-1.5 rounded-lg text-white"><Calendar size={20} /></div>
@@ -1860,64 +1730,6 @@ export default function App() {
       <main className="flex-1 max-w-7xl mx-auto w-full p-4 h-[calc(100vh-64px)] overflow-hidden flex flex-col">
         {activeTab === 'admin' && (
           <div className="space-y-6 animate-in fade-in duration-300 h-full overflow-y-auto pb-20 custom-scrollbar">
-            {/* 账号管理 - 仅管理员可见 */}
-            {user.role === 'admin' && (
-            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
-              <div className="flex justify-between items-center mb-4">
-                <h2 className="text-lg font-bold text-gray-800 flex items-center gap-2">
-                  <Users className="text-blue-600" size={20}/> 账号管理
-                </h2>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-gray-400">账号将自动显示在专家列表中</span>
-                  <button 
-                    onClick={() => { setEditingUser({ role: 'user', status: 1 }); setShowUserModal(true); }}
-                      className="flex items-center gap-1 bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm"
-                    >
-                      <Plus size={16}/> 新增账号
-                    </button>
-                  </div>
-                </div>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm text-left">
-                    <thead className="text-xs text-gray-500 uppercase bg-gray-50 border-b">
-                      <tr>
-                        <th className="px-4 py-3">姓名</th>
-                        <th className="px-4 py-3">手机号</th>
-                        <th className="px-4 py-3">角色</th>
-                        <th className="px-4 py-3">状态</th>
-                        <th className="px-4 py-3 text-right">操作</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {managedUsers.map(u => (
-                        <tr key={u.id} className="hover:bg-gray-50 transition">
-                          <td className="px-4 py-3 font-medium">{u.name}</td>
-                          <td className="px-4 py-3 text-gray-500">{u.phone}</td>
-                          <td className="px-4 py-3">
-                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${u.role === 'admin' ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-600'}`}>
-                              {u.role === 'admin' ? '管理员' : '普通用户'}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3">
-                            <span className={`flex items-center gap-1 ${u.status === 1 ? 'text-green-600' : 'text-red-500'}`}>
-                              <div className={`w-1.5 h-1.5 rounded-full ${u.status === 1 ? 'bg-green-600' : 'bg-red-500'}`}></div>
-                              {u.status === 1 ? '正常' : '禁用'}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-right">
-                            <button onClick={() => { setEditingUser(u); setShowUserModal(true); }} className="text-blue-600 hover:text-blue-800 p-1"><Edit2 size={16}/></button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
-            )}
-
-              {/* 专家筛选列表 UI 已移除，直接使用账号管理 */}
-            
-
             {/* 批量导入 - 仅管理员可见 */}
             {user.role === 'admin' && (
             <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
@@ -2302,75 +2114,6 @@ export default function App() {
                <div><button onClick={handleSaveEdit} className="w-full bg-blue-600 text-white py-2 rounded-lg mt-2 font-bold shadow-lg shadow-blue-200">保存修改</button></div>
              </div>
            </div>
-        </div>
-      )}
-
-      {showUserModal && editingUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-md">
-            <div className="px-6 py-4 border-b border-gray-100 flex justify-between items-center">
-              <h3 className="font-bold text-gray-800">{editingUser.id ? '编辑账号' : '新增账号'}</h3>
-              <button onClick={() => { setShowUserModal(false); setEditingUser(null); }}><X size={20}/></button>
-            </div>
-            <form onSubmit={handleSaveManagedUser} className="p-6 space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">真实姓名</label>
-                <input 
-                  type="text" 
-                  required 
-                  className="w-full p-2 border rounded text-sm"
-                  value={editingUser.name || ''}
-                  onChange={e => setEditingUser({...editingUser, name: e.target.value})}
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">手机号</label>
-                <input 
-                  type="tel" 
-                  required 
-                  className="w-full p-2 border rounded text-sm"
-                  value={editingUser.phone || ''}
-                  onChange={e => setEditingUser({...editingUser, phone: e.target.value})}
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">{editingUser.id ? '重置密码 (留空则不修改)' : '初始密码'}</label>
-                <input 
-                  type="password" 
-                  required={!editingUser.id}
-                  className="w-full p-2 border rounded text-sm"
-                  placeholder="8位以上含大小写字母+数字"
-                  value={editingUser.password || ''}
-                  onChange={e => setEditingUser({...editingUser, password: e.target.value})}
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">权限角色</label>
-                  <select 
-                    className="w-full p-2 border rounded text-sm bg-white"
-                    value={editingUser.role || 'user'}
-                    onChange={e => setEditingUser({...editingUser, role: e.target.value})}
-                  >
-                    <option value="user">普通用户</option>
-                    <option value="admin">管理员</option>
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">账号状态</label>
-                  <select 
-                    className="w-full p-2 border rounded text-sm bg-white"
-                    value={editingUser.status}
-                    onChange={e => setEditingUser({...editingUser, status: parseInt(e.target.value)})}
-                  >
-                    <option value={1}>启用</option>
-                    <option value={0}>禁用</option>
-                  </select>
-                </div>
-              </div>
-              <button type="submit" className="w-full bg-blue-600 text-white py-2 rounded-lg mt-2 font-bold">保存账号</button>
-            </form>
-          </div>
         </div>
       )}
 

@@ -266,6 +266,18 @@ app.post('/api/auth/login', async (req, res) => {
   });
 });
 
+app.get('/api/auth/me', authenticateToken, (req, res) => {
+  const user = db.prepare(`
+    SELECT u.id, u.name, u.phone, r.name as role
+    FROM users u
+    JOIN roles r ON u.role_id = r.id
+    WHERE u.id = ? AND u.status = 1
+  `).get(req.user.id);
+
+  if (!user) return res.status(401).json({ error: '登录已失效' });
+  res.json({ user });
+});
+
 // --- 管理员专用 API ---
 
 // 2. 获取用户列表

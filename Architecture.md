@@ -1,7 +1,9 @@
 # ServiceMate 项目架构文档
 
 ## 1. 项目概述
-ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管理人员管理门店信息、专家列表，并根据日期和专家为门店安排访问任务。项目包含一个基于 React 的单页面前端应用（SPA）和一个基于 Node.js Express 的 RESTful 后端 API。
+ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管理人员管理账号、门店信息、专家列表，并根据日期和专家为门店安排访问任务。项目包含一个工作台入口页、一个基于 React 的排班单页面前端应用（SPA）和一个基于 Node.js Express 的 RESTful 后端 API。
+
+当前访问入口统一为 `/workspace/`：用户必须先在工作台登录，登录后根据角色展示工具入口与管理能力。管理员可在工作台进行账号管理；排班系统 `/workspace/schedule/` 只承载排班日历与门店库，不再提供独立登录入口和账号管理入口。
 
 ## 2. 技术栈说明
 ### 前端 (service-mate/)
@@ -12,6 +14,11 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 - **图标**: Lucide React
 - **导出能力**: ExcelJS（用于管理员导出排班月历 Excel）
 - **状态管理**: React Hooks (useState, useMemo, useEffect, useCallback)
+
+### 工作台 (landing_page/)
+- **页面形态**: 静态 HTML + 原生 JavaScript
+- **样式**: Tailwind CDN
+- **职责**: 统一登录入口、工具入口、管理员账号管理
 
 ### 后端 (server.js)
 - **框架**: Express.js (ES Module)
@@ -35,7 +42,7 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 │   ├── vite.config.ts      # Vite 配置文件
 │   ├── tailwind.config.js  # Tailwind 配置文件
 │   └── package.json        # 前端依赖与脚本
-├── landing_page/           # 静态着陆页
+├── landing_page/           # 工作台入口页：登录、工具入口、管理员账号管理
 ├── server.js               # 后端 API 服务器
 ├── database.sqlite         # SQLite 数据库文件 (运行时生成)
 ├── package.json            # 根目录依赖与脚本 (包含后端依赖)
@@ -44,10 +51,15 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 
 ## 4. 核心模块设计
 ### 前端模块
-- **认证模块 (Login)**:
-  - 手机号 + 密码登录。
-  - JWT Token 存储与请求拦截。
-  - Token 默认有效期 7 天；过期或无效 Token 返回 401 并要求重新登录。
+- **工作台入口 (landing_page/)**:
+  - `/workspace/` 是统一登录入口，未登录时只显示手机号 + 密码登录。
+  - 登录成功后展示工作台工具入口；管理员额外显示账号管理。
+  - 工作台通过 `localStorage.auth_user` 保存 JWT 与用户信息，并通过 `/api/auth/me` 校验本地登录态。
+  - 管理员可在工作台创建/编辑/禁用用户账号，账号会自动成为排班系统专家列表来源。
+- **认证模块 (Auth)**:
+  - 手机号 + 密码登录，登录接口返回 JWT。
+  - JWT Token 存储在 `localStorage.auth_user`，工作台和排班系统共用该登录态。
+  - Token 默认有效期 7 天；过期、无效或账号禁用时清除本地登录态并回到工作台登录。
 - **排班日历 (Calendar Tab)**: 
   - 支持月视图和周视图切换。
   - 必须选择特定专家查看其排班记录（不再支持“全部专家”视图）。
@@ -55,9 +67,9 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
   - 管理员可将“当前选中专家 + 当前月份”的排班表导出为 Excel。
   - 导出文件包含 `月历视图`、`排班明细` 两个 Sheet；月历视图按“周一到周日”排列。
 - **数据管理 (Admin Tab)**:
-  - **账号管理**: 管理员可创建/编辑/禁用用户账号 (专家)。
   - **门店管理**: 门店库 CRUD 操作。
   - **批量导入**: 支持 Excel/CSV 文本粘贴导入门店信息 (自动解析 Tab/空格/逗号分隔符)。
+  - 账号管理已迁移至工作台管理员页面，排班系统内不再显示账号管理。
 - **状态中心**:
   - 管理全局数据 (stores, visits) 及其加载状态。
   - 提供全局 Toast 通知。
@@ -74,13 +86,14 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
   - 自动创建默认管理员账号 (Admin@123)。
 
 ## 5. 数据流架构
-1. **初始化**: 前端加载时，通过 `fetchAllData` 函数并行调用 `/api/stores`, `/api/experts` (即 users), `/api/visits` 接口。
-2. **交互响应**: 
-   - 用户登录后获取 JWT Token，后续请求自动携带 Bearer Token。
-   - 管理员在“账号管理”中创建用户，后端写入 `users` 表。
+1. **工作台登录**: 未登录用户访问 `/workspace/` 时只看到登录表单。登录成功后，工作台将 JWT 与用户信息写入 `localStorage.auth_user`；刷新工作台时通过 `/api/auth/me` 校验 Token 和账号状态。
+2. **排班系统初始化**: 用户从工作台进入 `/workspace/schedule/` 后，排班前端读取同一份 `localStorage.auth_user`。若不存在有效登录态，则自动返回 `/workspace/`。登录态有效时，通过 `fetchAllData` 函数并行调用 `/api/stores`, `/api/experts` (即 users), `/api/visits` 接口。
+3. **交互响应**:
+   - 后续 API 请求自动携带 Bearer Token。
+   - 管理员在工作台“账号管理”中创建用户，后端写入 `users` 表。
    - 用户在管理页导入数据，发送 `POST /api/stores/batch` 请求。
    - 管理员可在排班页基于当前已加载的 `stores`、`visits` 数据直接生成 Excel，无需新增后端导出接口。
-3. **数据同步**: 后端接收请求，执行 SQL 更新数据库，返回结果。前端收到成功响应后，通过 `fetchAllData` 或局部状态更新同步 UI。
+4. **数据同步**: 后端接收请求，执行 SQL 更新数据库，返回结果。前端收到成功响应后，通过 `fetchAllData` 或局部状态更新同步 UI。
 
 ## 6. 数据库设计 (Schema)
 ### Users (用户/专家表)
@@ -141,6 +154,7 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 | 功能模块 | 操作 | 路径 | 管理员 (Admin) | 普通用户 (User) |
 | :--- | :--- | :--- | :--- | :--- |
 | **认证** | 登录 | POST `/api/auth/login` | ✅ | ✅ |
+| | 校验当前登录态 | GET `/api/auth/me` | ✅ | ✅ |
 | **账号管理** | 查看列表 | GET `/api/admin/users` | ✅ | ⛔ 403 |
 | | 创建账号 | POST `/api/admin/users` | ✅ | ⛔ 403 |
 | | 更新账号 | PUT `/api/admin/users/:id` | ✅ | ⛔ 403 |
@@ -166,6 +180,7 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 | 接口名 | 方法 | 路径 | 权限 | 说明 |
 | :--- | :--- | :--- | :--- | :--- |
 | 用户登录 | POST | `/api/auth/login` | 公开 | 返回 JWT Token |
+| 当前用户校验 | GET | `/api/auth/me` | User/Admin | 校验 JWT 是否有效，并返回当前用户基础信息 |
 
 ### 管理员 (Admin)
 | 接口名 | 方法 | 路径 | 权限 | 说明 |
@@ -193,7 +208,8 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 | 导出当月排班 Excel | 前端动作 | Admin | 基于当前选中专家与当前月份生成 `.xlsx`，包含月历视图与排班明细 |
 
 ## 8. 部署架构
-- **前端部署**: 构建后的静态文件 (通常是 `service-mate/dist/`) 可由 Nginx 或静态托管服务部署。
+- **工作台部署**: `/workspace/` 由 `landing_page/` 静态文件提供，作为统一登录与工具入口。
+- **排班前端部署**: `/workspace/schedule/` 由构建后的 `service-mate/dist/` 提供。
 - **后端部署**: 使用 PM2 或类似工具运行 `node server.js`。
 - **反向代理**: 建议使用 Nginx 配置 `/api` 路径的代理转发到 Node.js 服务。
 

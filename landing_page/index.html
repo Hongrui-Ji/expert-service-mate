@@ -10,73 +10,464 @@
         body { font-family: 'Inter', sans-serif; background-color: #f9fafb; }
     </style>
 </head>
-<body class="bg-gray-50 min-h-screen flex flex-col">
-    <!-- Navbar -->
-    <nav class="bg-white border-b border-gray-200 px-4 py-3 sticky top-0 z-20 shadow-sm">
-        <div class="max-w-7xl mx-auto flex justify-between items-center">
-            <div class="flex items-center gap-2">
-                <div class="bg-blue-600 p-1.5 rounded-lg text-white">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-layout-grid"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
-                </div>
-                <h1 class="text-xl font-bold text-gray-900 tracking-tight">PCO 专家园地</h1>
-            </div>
-            <div class="flex items-center gap-4">
-            </div>
-        </div>
-    </nav>
+<body class="bg-gray-50 min-h-screen text-gray-800">
+    <div id="app"></div>
 
-    <!-- Main Content -->
-    <main class="flex-1 max-w-7xl mx-auto w-full p-6">
+    <script>
+        const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+            ? 'http://localhost:3000/api'
+            : '/api';
+        const AUTH_KEY = 'auth_user';
+        const app = document.getElementById('app');
 
-        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            <!-- Module 1: Expert Schedule (Active) -->
-            <a href="/workspace/schedule/" class="bg-white p-6 rounded-xl shadow-sm border border-gray-200 hover:shadow-md hover:border-blue-300 transition cursor-pointer group block">
-                <div class="flex items-center gap-3 mb-4">
-                    <div class="p-2 bg-blue-100 text-blue-600 rounded-lg group-hover:bg-blue-600 group-hover:text-white transition">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-calendar"><rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/></svg>
+        let currentUser = readSavedUser();
+        let managedUsers = [];
+        let editingUser = null;
+        let sessionChecked = false;
+
+        function escapeHtml(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function getJwtExp(token) {
+            const parts = String(token || '').split('.');
+            if (parts.length !== 3) return null;
+            try {
+                const payloadBase64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+                const padded = payloadBase64.padEnd(payloadBase64.length + ((4 - (payloadBase64.length % 4)) % 4), '=');
+                const payload = JSON.parse(atob(padded));
+                return typeof payload.exp === 'number' ? payload.exp : null;
+            } catch {
+                return null;
+            }
+        }
+
+        function readSavedUser() {
+            const saved = localStorage.getItem(AUTH_KEY);
+            if (!saved) return null;
+            try {
+                const parsed = JSON.parse(saved);
+                const exp = getJwtExp(parsed.token);
+                if (!parsed.token || (exp && exp * 1000 <= Date.now())) {
+                    localStorage.removeItem(AUTH_KEY);
+                    return null;
+                }
+                return parsed;
+            } catch {
+                localStorage.removeItem(AUTH_KEY);
+                return null;
+            }
+        }
+
+        function saveUser(user) {
+            currentUser = user;
+            localStorage.setItem(AUTH_KEY, JSON.stringify(user));
+        }
+
+        function clearUser() {
+            currentUser = null;
+            managedUsers = [];
+            editingUser = null;
+            localStorage.removeItem(AUTH_KEY);
+        }
+
+        async function authenticatedFetch(path, options = {}) {
+            const res = await fetch(`${API_BASE}${path}`, {
+                ...options,
+                headers: {
+                    ...(options.headers || {}),
+                    Authorization: `Bearer ${currentUser?.token || ''}`
+                }
+            });
+            if (res.status === 401 || res.status === 403) {
+                clearUser();
+                render();
+                throw new Error(res.status === 403 ? '没有权限或账号已禁用' : '登录已失效');
+            }
+            return res;
+        }
+
+        function showToast(message, type = 'info') {
+            const root = document.getElementById('toast-root');
+            if (!root) return;
+            const colors = {
+                success: 'bg-green-600 text-white',
+                error: 'bg-red-600 text-white',
+                info: 'bg-gray-800 text-white'
+            };
+            const item = document.createElement('div');
+            item.className = `px-4 py-3 rounded-lg shadow-lg text-sm font-medium ${colors[type] || colors.info}`;
+            item.textContent = message;
+            root.appendChild(item);
+            setTimeout(() => item.remove(), 3000);
+        }
+
+        async function validateSavedSession() {
+            if (!currentUser || sessionChecked) return;
+            sessionChecked = true;
+            try {
+                const res = await authenticatedFetch('/auth/me');
+                const data = await res.json();
+                saveUser({ ...data.user, token: currentUser.token });
+                render();
+                if (currentUser.role === 'admin') fetchManagedUsers();
+            } catch {
+                showToast('登录已失效，请重新登录', 'info');
+            }
+        }
+
+        async function handleLogin(event) {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const phone = form.phone.value.trim();
+            const password = form.password.value;
+
+            try {
+                const res = await fetch(`${API_BASE}/auth/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ phone, password })
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    showToast(data.error || '手机号或密码错误', 'error');
+                    return;
+                }
+                saveUser({ ...data.user, token: data.token });
+                sessionChecked = true;
+                render();
+                showToast('登录成功', 'success');
+                if (currentUser.role === 'admin') fetchManagedUsers();
+            } catch {
+                showToast('网络连接失败', 'error');
+            }
+        }
+
+        function handleLogout() {
+            clearUser();
+            render();
+            showToast('已退出登录', 'info');
+        }
+
+        async function fetchManagedUsers() {
+            if (currentUser?.role !== 'admin') return;
+            try {
+                const res = await authenticatedFetch('/admin/users');
+                managedUsers = await res.json();
+                render();
+            } catch (err) {
+                showToast(err.message || '账号列表加载失败', 'error');
+            }
+        }
+
+        function openCreateUserModal() {
+            editingUser = { role: 'user', status: 1 };
+            render();
+        }
+
+        function openEditUserModal(userId) {
+            const found = managedUsers.find(user => String(user.id) === String(userId));
+            if (!found) return;
+            editingUser = { ...found };
+            render();
+        }
+
+        function closeUserModal() {
+            editingUser = null;
+            render();
+        }
+
+        async function handleSaveUser(event) {
+            event.preventDefault();
+            const form = event.currentTarget;
+            const payload = {
+                name: form.name.value.trim(),
+                phone: form.phone.value.trim(),
+                role: form.role.value,
+                status: Number(form.status.value)
+            };
+            const password = form.password.value;
+            if (password) payload.password = password;
+
+            if (payload.name.length < 2 || payload.name.length > 20) {
+                showToast('姓名需在2-20字符之间', 'error');
+                return;
+            }
+            if (!/^1[3-9]\d{9}$/.test(payload.phone)) {
+                showToast('手机号格式错误', 'error');
+                return;
+            }
+            if (!editingUser.id && !password) {
+                showToast('请填写初始密码', 'error');
+                return;
+            }
+            if (password && !/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}$/.test(password)) {
+                showToast('密码需8位以上，包含大小写字母和数字', 'error');
+                return;
+            }
+
+            const isNew = !editingUser.id;
+            try {
+                const res = await authenticatedFetch(isNew ? '/admin/users' : `/admin/users/${editingUser.id}`, {
+                    method: isNew ? 'POST' : 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                if (!res.ok) {
+                    showToast(data.error || '保存失败', 'error');
+                    return;
+                }
+                editingUser = null;
+                showToast(isNew ? '账号已创建' : '账号已更新', 'success');
+                fetchManagedUsers();
+            } catch (err) {
+                showToast(err.message || '保存失败', 'error');
+            }
+        }
+
+        function renderLogin() {
+            app.innerHTML = `
+                <main class="min-h-screen flex items-center justify-center px-4 py-10">
+                    <div class="w-full max-w-md">
+                        <div class="text-center mb-6">
+                            <div class="inline-flex items-center justify-center w-12 h-12 rounded-xl bg-blue-600 text-white mb-4 shadow-lg shadow-blue-100">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
+                            </div>
+                            <h1 class="text-2xl font-bold text-gray-900">PCO 专家园地</h1>
+                            <p class="text-sm text-gray-500 mt-2">登录后进入工作台</p>
+                        </div>
+                        <form id="login-form" class="bg-white rounded-xl border border-gray-200 shadow-sm p-6 space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">手机号</label>
+                                <input name="phone" type="tel" required placeholder="11位手机号" class="w-full p-3 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">密码</label>
+                                <input name="password" type="password" required placeholder="请输入密码" class="w-full p-3 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                            </div>
+                            <button type="submit" class="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 transition">登录</button>
+                            <p class="text-xs text-center text-gray-400">未获得账号？请联系系统管理员</p>
+                        </form>
                     </div>
-                    <h3 class="font-bold text-gray-800 text-lg">专家排班工具</h3>
-                </div>
-                <p class="text-sm text-gray-500 mb-4">查看合作门店、按排服务计划。</p>
-                <div class="flex items-center text-sm text-blue-600 font-medium">
-                    进入应用 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-arrow-right ml-1"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
-                </div>
-            </a>
+                    <div id="toast-root" class="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none"></div>
+                </main>
+            `;
+            document.getElementById('login-form').addEventListener('submit', handleLogin);
+        }
 
-            <!-- Module 2: Terminal Report -->
-            <a href="/workspace/terminal-report/" class="bg-white p-6 rounded-xl shadow-sm border border-gray-200 hover:shadow-md hover:border-indigo-300 transition cursor-pointer group block">
-                <div class="flex items-center gap-3 mb-4">
-                    <div class="p-2 bg-indigo-100 text-indigo-600 rounded-lg group-hover:bg-indigo-600 group-hover:text-white transition">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-bar-chart-3"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>
+        function moduleCard({ href, tone, title, desc, icon }) {
+            const toneClass = {
+                blue: 'bg-blue-100 text-blue-600 group-hover:bg-blue-600 group-hover:text-white hover:border-blue-300',
+                indigo: 'bg-indigo-100 text-indigo-600 group-hover:bg-indigo-600 group-hover:text-white hover:border-indigo-300'
+            }[tone];
+            const linkClass = tone === 'indigo' ? 'text-indigo-600' : 'text-blue-600';
+            return `
+                <a href="${href}" class="bg-white p-6 rounded-xl shadow-sm border border-gray-200 hover:shadow-md ${toneClass.split(' ').pop()} transition cursor-pointer group block">
+                    <div class="flex items-center gap-3 mb-4">
+                        <div class="p-2 rounded-lg transition ${toneClass.replace(' ' + toneClass.split(' ').pop(), '')}">
+                            ${icon}
+                        </div>
+                        <h3 class="font-bold text-gray-800 text-lg">${title}</h3>
                     </div>
-                    <h3 class="font-bold text-gray-800 text-lg">终端监测报告</h3>
-                </div>
-                <p class="text-sm text-gray-500 mb-4">针对需要多次报告的门店，生成终端监测报告</p>
-                <div class="flex items-center text-sm text-indigo-600 font-medium">
-                    进入应用 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-arrow-right ml-1"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
-                </div>
-            </a>
-
-            <!-- Module 3: Report to PDF (Coming Soon) -->
-            <div class="bg-white p-6 rounded-xl shadow-sm border border-gray-200 hover:shadow-md transition cursor-pointer group opacity-75">
-                <div class="flex items-center gap-3 mb-4">
-                    <div class="p-2 bg-red-100 text-red-600 rounded-lg group-hover:bg-red-600 group-hover:text-white transition">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-file-text"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
+                    <p class="text-sm text-gray-500 mb-4">${desc}</p>
+                    <div class="flex items-center text-sm ${linkClass} font-medium">
+                        进入应用
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="ml-1"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>
                     </div>
-                    <h3 class="font-bold text-gray-800 text-lg">报告转 PDF</h3>
-                </div>
-                <p class="text-sm text-gray-500 mb-4">将日服务报告转化为PDF格式</p>
-                <div class="flex items-center text-sm text-gray-400 font-medium bg-gray-100 px-2 py-1 rounded w-fit">
-                    待开发
-                </div>
-            </div>
-        </div>
-    </main>
+                </a>
+            `;
+        }
 
-    <footer class="bg-white border-t border-gray-200 py-6 mt-auto">
-        <div class="max-w-7xl mx-auto px-4 text-center text-sm text-gray-500">
-            &copy; 2026 戢鸿瑞做的PCO专家空间
-        </div>
-    </footer>
+        function renderAccountManagement() {
+            if (currentUser.role !== 'admin') return '';
+            const rows = managedUsers.map(user => `
+                <tr class="hover:bg-gray-50 transition">
+                    <td class="px-4 py-3 font-medium">${escapeHtml(user.name)}</td>
+                    <td class="px-4 py-3 text-gray-500">${escapeHtml(user.phone)}</td>
+                    <td class="px-4 py-3">
+                        <span class="px-2 py-0.5 rounded text-[10px] font-bold ${user.role === 'admin' ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-600'}">
+                            ${user.role === 'admin' ? '管理员' : '普通用户'}
+                        </span>
+                    </td>
+                    <td class="px-4 py-3">
+                        <span class="inline-flex items-center gap-1 ${user.status === 1 ? 'text-green-600' : 'text-red-500'}">
+                            <span class="w-1.5 h-1.5 rounded-full ${user.status === 1 ? 'bg-green-600' : 'bg-red-500'}"></span>
+                            ${user.status === 1 ? '正常' : '禁用'}
+                        </span>
+                    </td>
+                    <td class="px-4 py-3 text-right">
+                        <button data-edit-user="${user.id}" class="text-blue-600 hover:bg-blue-50 p-1.5 rounded-lg transition" title="编辑账号">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+                        </button>
+                    </td>
+                </tr>
+            `).join('');
+
+            return `
+                <section class="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                    <div class="px-5 py-4 border-b border-gray-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+                        <div>
+                            <h2 class="text-lg font-bold text-gray-900">账号管理</h2>
+                            <p class="text-sm text-gray-500 mt-1">新增账号会自动进入排班系统专家列表</p>
+                        </div>
+                        <button id="create-user-button" class="inline-flex items-center justify-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 transition">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+                            新增账号
+                        </button>
+                    </div>
+                    <div class="overflow-x-auto">
+                        <table class="w-full text-sm text-left">
+                            <thead class="text-xs text-gray-500 uppercase bg-gray-50 border-b">
+                                <tr>
+                                    <th class="px-4 py-3">姓名</th>
+                                    <th class="px-4 py-3">手机号</th>
+                                    <th class="px-4 py-3">角色</th>
+                                    <th class="px-4 py-3">状态</th>
+                                    <th class="px-4 py-3 text-right">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody class="divide-y divide-gray-100">
+                                ${rows || '<tr><td colspan="5" class="px-4 py-8 text-center text-gray-400">暂无账号</td></tr>'}
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+            `;
+        }
+
+        function renderUserModal() {
+            if (!editingUser) return '';
+            const isEdit = Boolean(editingUser.id);
+            return `
+                <div class="fixed inset-0 z-40 flex items-center justify-center p-4 bg-black/50">
+                    <div class="bg-white rounded-xl shadow-xl w-full max-w-md">
+                        <div class="px-6 py-4 border-b border-gray-100 flex justify-between items-center">
+                            <h3 class="font-bold text-gray-800">${isEdit ? '编辑账号' : '新增账号'}</h3>
+                            <button id="close-user-modal" class="p-1 text-gray-500 hover:text-gray-900">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                            </button>
+                        </div>
+                        <form id="user-form" class="p-6 space-y-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">真实姓名</label>
+                                <input name="name" type="text" required value="${escapeHtml(editingUser.name || '')}" class="w-full p-2 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">手机号</label>
+                                <input name="phone" type="tel" required value="${escapeHtml(editingUser.phone || '')}" class="w-full p-2 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-700 mb-1">${isEdit ? '重置密码（留空则不修改）' : '初始密码'}</label>
+                                <input name="password" type="password" ${isEdit ? '' : 'required'} placeholder="8位以上含大小写字母+数字" class="w-full p-2 border border-gray-300 rounded-lg text-sm outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                            </div>
+                            <div class="grid grid-cols-2 gap-4">
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">权限角色</label>
+                                    <select name="role" class="w-full p-2 border border-gray-300 rounded-lg text-sm bg-white">
+                                        <option value="user" ${editingUser.role !== 'admin' ? 'selected' : ''}>普通用户</option>
+                                        <option value="admin" ${editingUser.role === 'admin' ? 'selected' : ''}>管理员</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">账号状态</label>
+                                    <select name="status" class="w-full p-2 border border-gray-300 rounded-lg text-sm bg-white">
+                                        <option value="1" ${Number(editingUser.status ?? 1) === 1 ? 'selected' : ''}>启用</option>
+                                        <option value="0" ${Number(editingUser.status ?? 1) === 0 ? 'selected' : ''}>禁用</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <button type="submit" class="w-full bg-blue-600 text-white py-2.5 rounded-lg font-bold hover:bg-blue-700 transition">保存账号</button>
+                        </form>
+                    </div>
+                </div>
+            `;
+        }
+
+        function renderWorkspace() {
+            app.innerHTML = `
+                <div class="min-h-screen flex flex-col">
+                    <nav class="bg-white border-b border-gray-200 px-4 py-3 sticky top-0 z-20 shadow-sm">
+                        <div class="max-w-7xl mx-auto flex justify-between items-center gap-4">
+                            <div class="flex items-center gap-2 min-w-0">
+                                <div class="bg-blue-600 p-1.5 rounded-lg text-white flex-shrink-0">
+                                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
+                                </div>
+                                <h1 class="text-xl font-bold text-gray-900 tracking-tight truncate">PCO 专家园地</h1>
+                            </div>
+                            <div class="flex items-center gap-3">
+                                <div class="hidden sm:flex flex-col items-end">
+                                    <span class="text-sm font-bold text-gray-900">${escapeHtml(currentUser.name)}</span>
+                                    <span class="text-[10px] bg-indigo-100 text-indigo-700 px-1.5 rounded font-bold">${currentUser.role === 'admin' ? '管理员' : '普通用户'}</span>
+                                </div>
+                                <button id="logout-button" class="px-3 py-2 rounded-lg text-sm text-gray-600 hover:bg-red-50 hover:text-red-600 transition">退出</button>
+                            </div>
+                        </div>
+                    </nav>
+
+                    <main class="flex-1 max-w-7xl mx-auto w-full p-6 space-y-6">
+                        <section>
+                            <div class="mb-4">
+                                <h2 class="text-lg font-bold text-gray-900">工作台</h2>
+                                <p class="text-sm text-gray-500 mt-1">选择需要进入的工具</p>
+                            </div>
+                            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                                ${moduleCard({
+                                    href: '/workspace/schedule/',
+                                    tone: 'blue',
+                                    title: '专家排班工具',
+                                    desc: '查看合作门店、安排服务计划。',
+                                    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="4" rx="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/></svg>'
+                                })}
+                                ${moduleCard({
+                                    href: '/workspace/terminal-report/',
+                                    tone: 'indigo',
+                                    title: '终端监测报告',
+                                    desc: '针对需要多次报告的门店，生成终端监测报告。',
+                                    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>'
+                                })}
+                            </div>
+                        </section>
+                        ${renderAccountManagement()}
+                    </main>
+
+                    <footer class="bg-white border-t border-gray-200 py-6 mt-auto">
+                        <div class="max-w-7xl mx-auto px-4 text-center text-sm text-gray-500">
+                            &copy; 2026 戢鸿瑞做的PCO专家空间
+                        </div>
+                    </footer>
+                    ${renderUserModal()}
+                    <div id="toast-root" class="fixed top-4 right-4 z-50 flex flex-col gap-2 pointer-events-none"></div>
+                </div>
+            `;
+            attachWorkspaceEvents();
+        }
+
+        function attachWorkspaceEvents() {
+            document.getElementById('logout-button')?.addEventListener('click', handleLogout);
+            document.getElementById('create-user-button')?.addEventListener('click', openCreateUserModal);
+            document.getElementById('close-user-modal')?.addEventListener('click', closeUserModal);
+            document.getElementById('user-form')?.addEventListener('submit', handleSaveUser);
+            document.querySelectorAll('[data-edit-user]').forEach(button => {
+                button.addEventListener('click', () => openEditUserModal(button.getAttribute('data-edit-user')));
+            });
+        }
+
+        function render() {
+            if (!currentUser) {
+                renderLogin();
+            } else {
+                renderWorkspace();
+            }
+        }
+
+        render();
+        validateSavedSession();
+    </script>
 </body>
 </html>
