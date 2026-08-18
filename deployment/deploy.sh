@@ -70,7 +70,12 @@ pm2 start server.js --name "zeosite-api"
 echo "启动终端监测报告服务..."
 pm2 delete zeosite-terminal-report 2>/dev/null || true
 pm2 start "./.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501 --server.baseUrlPath workspace/terminal-report --server.maxUploadSize 10 --server.headless true" --name "zeosite-terminal-report" --cwd "$APP_DIR/reporttowuye"
+
+echo "启动现场作业报告服务..."
+pm2 delete zeosite-onsite-report 2>/dev/null || true
+pm2 start "./.venv/bin/python -m streamlit run pco_onsite_report_app.py --server.address 127.0.0.1 --server.port 8502 --server.baseUrlPath onsite-report --server.maxUploadSize 10 --server.headless true" --name "zeosite-onsite-report" --cwd "$APP_DIR/reporttowuye"
 pm2 save
 
 echo "=== 部署完成！ ==="
 echo "访问地址: http://zeosite.com"
+echo "现场作业报告: http://zeosite.com/onsite-report/"

@@ -95,6 +95,20 @@ sudo systemctl start nginx
 
        client_max_body_size 10m;
 
+       location /onsite-report/ {
+           proxy_pass http://127.0.0.1:8502;
+           proxy_http_version 1.1;
+           proxy_set_header Upgrade $http_upgrade;
+           proxy_set_header Connection 'upgrade';
+           proxy_set_header Host $host;
+           proxy_cache_bypass $http_upgrade;
+           proxy_set_header X-Real-IP $remote_addr;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+           proxy_read_timeout 300s;
+           proxy_send_timeout 300s;
+       }
+
        location /workspace/terminal-report/ {
            proxy_pass http://127.0.0.1:8501;
            proxy_http_version 1.1;
@@ -139,6 +153,9 @@ pm2 start server.js --name "zeosite-api"
 # 终端监测报告工具（Streamlit，部署在 /workspace/terminal-report/）
 pm2 start "./.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501 --server.baseUrlPath workspace/terminal-report --server.maxUploadSize 10 --server.headless true" --name "zeosite-terminal-report" --cwd /var/www/zeosite/reporttowuye
 
+# 现场作业报告工具（独立公开页面，部署在 /onsite-report/）
+pm2 start "./.venv/bin/python -m streamlit run pco_onsite_report_app.py --server.address 127.0.0.1 --server.port 8502 --server.baseUrlPath onsite-report --server.maxUploadSize 10 --server.headless true" --name "zeosite-onsite-report" --cwd /var/www/zeosite/reporttowuye
+
 # 保存当前进程列表，以便开机自启
 pm2 save
 pm2 startup
@@ -150,6 +167,7 @@ pm2 startup
 - 根路径 `/` 应显示 "欢迎来到 Neo 的网站"。
 - `/workspace` 应显示工作台。
 - `/workspace/schedule` 应进入排班系统。
+- `/onsite-report/` 应直接进入现场作业报告工具，无需登录。
 
 ---
 
@@ -182,7 +200,17 @@ cd reporttowuye && ./.venv/bin/pip install -r requirements.txt && cd ..
 pm2 restart zeosite-terminal-report
 ```
 
-### 场景 C：更新 Nginx 配置（路由/上传限制/超时等）
+### 场景 C：更新现场作业报告（Streamlit）
+适用：改了 `reporttowuye/pco_onsite_report_app.py`。
+
+```bash
+cd /var/www/zeosite
+git pull
+
+pm2 restart zeosite-onsite-report
+```
+
+### 场景 D：更新 Nginx 配置（路由/上传限制/超时等）
 适用：改了 `deployment/nginx.conf`（例如新增反代路径、修改 `client_max_body_size`）。
 
 ```bash
@@ -193,7 +221,7 @@ sudo cp deployment/nginx.conf /etc/nginx/sites-available/zeosite
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-### 场景 D：一次更新同时包含多个部分
+### 场景 E：一次更新同时包含多个部分
 按顺序依次执行对应场景即可；通常建议顺序：
 - 先 `git pull`
 - 再构建前端 / 安装依赖
