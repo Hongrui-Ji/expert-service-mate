@@ -56,6 +56,17 @@ python3 -m venv .venv
 ./.venv/bin/pip install -r requirements.txt
 cd ..
 
+echo "部署智能排班生成器 (Streamlit)..."
+cd auto_scheduler
+python3 -m venv .venv
+./.venv/bin/pip install --upgrade pip
+./.venv/bin/pip install -r requirements.txt
+cd ..
+
+echo "准备智能排班共享配置目录..."
+sudo mkdir -p /var/lib/zeosite/auto-scheduler
+sudo chown -R $USER:$USER /var/lib/zeosite/auto-scheduler
+
 # 5. 配置 Nginx
 echo "配置 Nginx..."
 sudo cp deployment/nginx.conf "$NGINX_CONF"
@@ -74,8 +85,13 @@ pm2 start "./.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1
 echo "启动现场作业报告服务..."
 pm2 delete zeosite-onsite-report 2>/dev/null || true
 pm2 start "./.venv/bin/python -m streamlit run pco_onsite_report_app.py --server.address 127.0.0.1 --server.port 8502 --server.baseUrlPath onsite-report --server.maxUploadSize 10 --server.headless true" --name "zeosite-onsite-report" --cwd "$APP_DIR/reporttowuye"
+
+echo "启动智能排班生成器..."
+pm2 delete zeosite-auto-scheduler 2>/dev/null || true
+SCHEDULER_CONFIG_PATH=/var/lib/zeosite/auto-scheduler/config.json pm2 start "./auto_scheduler/.venv/bin/python -m streamlit run auto_scheduler/app.py --server.address 127.0.0.1 --server.port 8503 --server.baseUrlPath auto-schedule --server.maxUploadSize 10 --server.headless true --server.fileWatcherType none --client.toolbarMode minimal --browser.gatherUsageStats false" --name "zeosite-auto-scheduler" --cwd "$APP_DIR" --max-memory-restart 512M
 pm2 save
 
 echo "=== 部署完成！ ==="
 echo "访问地址: http://zeosite.com"
 echo "现场作业报告: http://zeosite.com/onsite-report/"
+echo "智能排班生成器: http://zeosite.com/auto-schedule/"

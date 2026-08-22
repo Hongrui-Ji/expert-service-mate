@@ -264,9 +264,10 @@
         function moduleCard({ href, tone, title, desc, icon }) {
             const toneClass = {
                 blue: 'bg-blue-100 text-blue-600 group-hover:bg-blue-600 group-hover:text-white hover:border-blue-300',
-                indigo: 'bg-indigo-100 text-indigo-600 group-hover:bg-indigo-600 group-hover:text-white hover:border-indigo-300'
+                indigo: 'bg-indigo-100 text-indigo-600 group-hover:bg-indigo-600 group-hover:text-white hover:border-indigo-300',
+                emerald: 'bg-emerald-100 text-emerald-600 group-hover:bg-emerald-600 group-hover:text-white hover:border-emerald-300'
             }[tone];
-            const linkClass = tone === 'indigo' ? 'text-indigo-600' : 'text-blue-600';
+            const linkClass = tone === 'indigo' ? 'text-indigo-600' : (tone === 'emerald' ? 'text-emerald-600' : 'text-blue-600');
             return `
                 <a href="${href}" class="bg-white p-6 rounded-xl shadow-sm border border-gray-200 hover:shadow-md ${toneClass.split(' ').pop()} transition cursor-pointer group block">
                     <div class="flex items-center gap-3 mb-4">
@@ -430,6 +431,13 @@
                                     title: '终端监测报告',
                                     desc: '针对需要多次报告的门店，生成终端监测报告。',
                                     icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18 17V9"/><path d="M13 17V5"/><path d="M8 17v-3"/></svg>'
+                                })}
+                                ${moduleCard({
+                                    href: '/auto-schedule/',
+                                    tone: 'emerald',
+                                    title: '智能排班生成器',
+                                    desc: '上传前置表，按共享规则生成新的排班 Excel。',
+                                    icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v4"/><path d="M16 2v4"/><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M3 10h18"/><path d="m9 16 2 2 4-4"/></svg>'
                                 })}
                             </div>
                         </section>

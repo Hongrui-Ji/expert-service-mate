@@ -3,7 +3,7 @@
 ## 1. 项目概述
 ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管理人员管理账号、门店信息、专家列表，并根据日期和专家为门店安排访问任务。项目包含一个工作台入口页、一个基于 React 的排班单页面前端应用（SPA）和一个基于 Node.js Express 的 RESTful 后端 API。
 
-当前访问入口统一为 `/workspace/`：用户必须先在工作台登录，登录后根据角色展示工具入口与管理能力。管理员可在工作台进行账号管理；排班系统 `/workspace/schedule/` 只承载排班日历与门店库，不再提供独立登录入口和账号管理入口。
+账号型工具的访问入口统一为 `/workspace/`：用户登录后根据角色展示工具入口与管理能力。管理员可在工作台进行账号管理；排班系统 `/workspace/schedule/` 只承载排班日历与门店库。Excel 智能排班生成器由工作台卡片进入，但 `/auto-schedule/` 本身是无需登录的独立公开工具。
 
 ## 2. 技术栈说明
 ### 前端 (service-mate/)
@@ -19,6 +19,11 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 - **页面形态**: 静态 HTML + 原生 JavaScript
 - **样式**: Tailwind CDN
 - **职责**: 统一登录入口、工具入口、管理员账号管理
+
+### Excel 智能排班生成器 (auto_scheduler/)
+- **框架**: Streamlit + Pandas + OpenPyXL
+- **职责**: 内存读取前置表、执行自动排班、展示异常、内存生成结果工作簿
+- **配置**: 部署目录外的共享 JSON；不读取或写入业务 SQLite
 
 ### 后端 (server.js)
 - **框架**: Express.js (ES Module)
@@ -211,6 +216,7 @@ ServiceMate 是一个用于门店排班管理的 Web 应用程序。它允许管
 - **工作台部署**: `/workspace/` 由 `landing_page/` 静态文件提供，作为统一登录与工具入口。
 - **排班前端部署**: `/workspace/schedule/` 由构建后的 `service-mate/dist/` 提供。
 - **后端部署**: 使用 PM2 或类似工具运行 `node server.js`。
+- **智能排班部署**: PM2 在 `127.0.0.1:8503` 运行 Streamlit，Nginx 将 `/auto-schedule/` 反向代理到该服务。
 - **反向代理**: 建议使用 Nginx 配置 `/api` 路径的代理转发到 Node.js 服务。
 
 ## 9. 后续迭代注意事项

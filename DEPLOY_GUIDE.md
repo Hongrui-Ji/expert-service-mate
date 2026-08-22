@@ -76,6 +76,15 @@ sudo systemctl start nginx
    ./.venv/bin/pip install --upgrade pip
    ./.venv/bin/pip install -r requirements.txt
    cd ..
+
+   # 安装智能排班生成器依赖（独立虚拟环境）
+   python3 -m venv auto_scheduler/.venv
+   auto_scheduler/.venv/bin/pip install --upgrade pip
+   auto_scheduler/.venv/bin/pip install -r auto_scheduler/requirements.txt
+
+   # 共享规则配置放在代码目录之外，更新代码时不会被覆盖
+   sudo mkdir -p /var/lib/zeosite/auto-scheduler
+   sudo chown -R $USER:$USER /var/lib/zeosite/auto-scheduler
    ```
 
 ## 第四步：配置 Nginx
@@ -89,6 +98,8 @@ sudo systemctl start nginx
 
 2. **粘贴以下内容**：
    ```nginx
+   limit_req_zone $binary_remote_addr zone=auto_schedule:10m rate=60r/m;
+
    server {
        listen 80;
        server_name zeosite.com www.zeosite.com;
@@ -119,6 +130,20 @@ sudo systemctl start nginx
            proxy_set_header X-Real-IP $remote_addr;
            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
            proxy_set_header X-Forwarded-Proto $scheme;
+       }
+
+       location /auto-schedule/ {
+           limit_req zone=auto_schedule burst=30 nodelay;
+           proxy_pass http://127.0.0.1:8503;
+           proxy_http_version 1.1;
+           proxy_set_header Upgrade $http_upgrade;
+           proxy_set_header Connection 'upgrade';
+           proxy_set_header Host $host;
+           proxy_set_header X-Real-IP $remote_addr;
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           proxy_set_header X-Forwarded-Proto $scheme;
+           proxy_read_timeout 120s;
+           proxy_send_timeout 120s;
        }
 
        location / {
@@ -156,6 +181,9 @@ pm2 start "./.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1
 # 现场作业报告工具（独立公开页面，部署在 /onsite-report/）
 pm2 start "./.venv/bin/python -m streamlit run pco_onsite_report_app.py --server.address 127.0.0.1 --server.port 8502 --server.baseUrlPath onsite-report --server.maxUploadSize 10 --server.headless true" --name "zeosite-onsite-report" --cwd /var/www/zeosite/reporttowuye
 
+# Excel 智能排班工具（独立公开页面，部署在 /auto-schedule/）
+SCHEDULER_CONFIG_PATH=/var/lib/zeosite/auto-scheduler/config.json pm2 start "./auto_scheduler/.venv/bin/python -m streamlit run auto_scheduler/app.py --server.address 127.0.0.1 --server.port 8503 --server.baseUrlPath auto-schedule --server.maxUploadSize 10 --server.headless true --server.fileWatcherType none --client.toolbarMode minimal --browser.gatherUsageStats false" --name "zeosite-auto-scheduler" --cwd /var/www/zeosite --max-memory-restart 512M
+
 # 保存当前进程列表，以便开机自启
 pm2 save
 pm2 startup
@@ -168,6 +196,7 @@ pm2 startup
 - `/workspace` 应显示工作台。
 - `/workspace/schedule` 应进入排班系统。
 - `/onsite-report/` 应直接进入现场作业报告工具，无需登录。
+- `/auto-schedule/` 应直接进入智能排班生成器，无需登录。
 
 ---
 
@@ -221,7 +250,17 @@ sudo cp deployment/nginx.conf /etc/nginx/sites-available/zeosite
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-### 场景 E：一次更新同时包含多个部分
+### 场景 E：更新智能排班生成器
+适用：改了 `auto_scheduler/`、工作台卡片或智能排班 Nginx 路由。共享规则位于 `/var/lib/zeosite/auto-scheduler/config.json`，脚本不会覆盖它。
+
+```bash
+cd /var/www/zeosite
+git pull
+sudo bash deployment/deploy_auto_scheduler.sh
+pm2 restart zeosite-api
+```
+
+### 场景 F：一次更新同时包含多个部分
 按顺序依次执行对应场景即可；通常建议顺序：
 - 先 `git pull`
 - 再构建前端 / 安装依赖

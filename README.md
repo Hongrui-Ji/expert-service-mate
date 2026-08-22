@@ -1,6 +1,6 @@
 # 专家排班管理系统 (Expert Service Mate)
 
-这是一个基于 React + Node.js + SQLite 的全栈专家排班与门店管理系统。
+这是一个包含专家工作台、排班管理和多个独立报告/Excel 工具的应用集合。
 
 ## 🚀 快速开始
 
@@ -89,6 +89,7 @@ git merge feature-new-login
 
 - `/server.js` - 后端入口文件，包含数据库定义和 API 接口。
 - `/service-mate/` - 前端 React 项目目录。
+- `/auto_scheduler/` - 公开的 Excel 智能排班生成器（Streamlit，不连接业务数据库）。
 - `/database.sqlite` - SQLite 数据库文件 (由 server.js 自动生成)。
 - `/Deployment.md` - 详细部署文档。
 - `/Architecture.md` - 系统架构文档。
