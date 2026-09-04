@@ -64,3 +64,13 @@ def test_rejects_rows_without_a_terminal_identity():
                 "image_url_oss": "oss://bucket/a/1779749000.jpeg",
             }
         )
+
+
+def test_environment_requires_user_api_key(monkeypatch):
+    from reporttowuye.monitoring_api import client_from_environment
+
+    monkeypatch.delenv("REDASH_API_KEY", raising=False)
+    monkeypatch.setenv("REDASH_QUERY_API_KEY", "query-key-is-insufficient")
+
+    with pytest.raises(MonitoringAPIError, match="用户 API 密钥"):
+        client_from_environment()

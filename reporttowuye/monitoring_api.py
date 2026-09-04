@@ -239,7 +239,7 @@ class RedashMonitoringClient:
         timeout_seconds: int = 60,
     ) -> None:
         if not api_key:
-            raise MonitoringAPIError("未配置 Redash 查询密钥")
+            raise MonitoringAPIError("未配置 Redash 用户 API 密钥")
         self.base_url = base_url.rstrip("/")
         self.query_id = int(query_id)
         self.timeout_seconds = timeout_seconds
@@ -318,7 +318,8 @@ class RedashMonitoringClient:
 
 
 def client_from_environment() -> RedashMonitoringClient:
-    api_key = os.environ.get("REDASH_QUERY_API_KEY") or os.environ.get("REDASH_API_KEY") or ""
+    # 参数化查询可能启动异步任务；Redash 查询级 Key 无权轮询该任务，必须使用用户 API Key。
+    api_key = os.environ.get("REDASH_API_KEY") or ""
     return RedashMonitoringClient(
         api_key=api_key,
         base_url=os.environ.get("REDASH_BASE_URL", DEFAULT_REDASH_URL),

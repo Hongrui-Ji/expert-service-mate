@@ -232,7 +232,7 @@ sudo mkdir -p /var/lib/zeosite/terminal-report
 sudo chown -R $USER:$USER /var/lib/zeosite/terminal-report
 chmod 700 /var/lib/zeosite/terminal-report
 
-# 首次配置时执行，随后填写 51060 的查询级 API Key
+# 首次配置时执行，随后填写 Redash 用户 API Key
 if [ ! -f /var/lib/zeosite/terminal-report/config.env ]; then
   cp deployment/terminal-report.env.example /var/lib/zeosite/terminal-report/config.env
 fi
