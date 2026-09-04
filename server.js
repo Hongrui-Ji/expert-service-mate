@@ -14,6 +14,9 @@ const __dirname = path.dirname(__filename);
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-12345'; // 生产环境应从环境变量获取
 const PORT = 3000;
 const DB_PATH = path.join(__dirname, 'database.sqlite');
+const AUTH_COOKIE_NAME = 'zeosite_workspace_token';
+const AUTH_COOKIE_SECURE = process.env.AUTH_COOKIE_SECURE !== 'false';
+const AUTH_COOKIE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 // 校验正则表达式
 const PHONE_REGEX = /^1[3-9]\d{9}$/;
@@ -208,9 +211,37 @@ if (adminCount.count === 0) {
 // ['张三', '李四', '王五', '赵六'].forEach(name => initExperts.run(name));
 
 // --- 认证与鉴权中间件 ---
+const readCookie = (req, name) => {
+  const cookies = String(req.headers.cookie || '').split(';');
+  for (const cookie of cookies) {
+    const separator = cookie.indexOf('=');
+    if (separator === -1) continue;
+    const key = cookie.slice(0, separator).trim();
+    if (key === name) {
+      try {
+        return decodeURIComponent(cookie.slice(separator + 1).trim());
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+};
+
+const setAuthCookie = (res, token) => {
+  res.cookie(AUTH_COOKIE_NAME, token, {
+    httpOnly: true,
+    secure: AUTH_COOKIE_SECURE,
+    sameSite: 'lax',
+    path: '/',
+    maxAge: AUTH_COOKIE_MAX_AGE_MS,
+  });
+};
+
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
+  const bearerToken = authHeader && authHeader.split(' ')[1];
+  const token = bearerToken || readCookie(req, AUTH_COOKIE_NAME);
   if (!token) return res.sendStatus(401);
 
   jwt.verify(token, JWT_SECRET, (err, user) => {
@@ -221,6 +252,7 @@ const authenticateToken = (req, res, next) => {
     if (!dbUser || dbUser.status === 0) return res.status(403).json({ error: 'Account disabled' });
     
     req.user = user;
+    req.authToken = token;
     next();
   });
 };
@@ -260,6 +292,7 @@ app.post('/api/auth/login', async (req, res) => {
     { expiresIn: '7d' }
   );
 
+  setAuthCookie(res, token);
   res.json({ 
     token, 
     user: { id: user.id, name: user.name, role: user.role, phone: user.phone } 
@@ -275,7 +308,23 @@ app.get('/api/auth/me', authenticateToken, (req, res) => {
   `).get(req.user.id);
 
   if (!user) return res.status(401).json({ error: '登录已失效' });
+  setAuthCookie(res, req.authToken);
   res.json({ user });
+});
+
+// 供 Nginx auth_request 校验工作台内的独立工具入口，不返回用户信息。
+app.get('/api/auth/session', authenticateToken, (req, res) => {
+  res.sendStatus(204);
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  res.clearCookie(AUTH_COOKIE_NAME, {
+    httpOnly: true,
+    secure: AUTH_COOKIE_SECURE,
+    sameSite: 'lax',
+    path: '/',
+  });
+  res.json({ success: true });
 });
 
 // --- 管理员专用 API ---

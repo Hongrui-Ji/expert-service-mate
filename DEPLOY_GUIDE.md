@@ -225,9 +225,28 @@ cd /var/www/zeosite
 git pull
 
 cd reporttowuye && ./.venv/bin/pip install -r requirements.txt && cd ..
+sudo reporttowuye/.venv/bin/python -m playwright install-deps chromium
+reporttowuye/.venv/bin/python -m playwright install chromium
 
-pm2 restart zeosite-terminal-report
+sudo mkdir -p /var/lib/zeosite/terminal-report
+sudo chown -R $USER:$USER /var/lib/zeosite/terminal-report
+chmod 700 /var/lib/zeosite/terminal-report
+
+# 首次配置时执行，随后填写 51060 的查询级 API Key
+if [ ! -f /var/lib/zeosite/terminal-report/config.env ]; then
+  cp deployment/terminal-report.env.example /var/lib/zeosite/terminal-report/config.env
+fi
+chmod 600 /var/lib/zeosite/terminal-report/config.env
+
+set -a
+source /var/lib/zeosite/terminal-report/config.env
+set +a
+export YANSHOU_STATE_PATH=/var/lib/zeosite/terminal-report/yanshou-storage-state.json
+
+pm2 restart zeosite-terminal-report --update-env
 ```
+
+扫码登录成功后，验收登录态会写入 `/var/lib/zeosite/terminal-report/yanshou-storage-state.json`，重新拉取代码或重启进程不会清除它。登录过期时直接在报告页面重新扫码。
 
 ### 场景 C：更新现场作业报告（Streamlit）
 适用：改了 `reporttowuye/pco_onsite_report_app.py`。
@@ -248,6 +267,12 @@ git pull
 
 sudo cp deployment/nginx.conf /etc/nginx/sites-available/zeosite
 sudo nginx -t && sudo systemctl reload nginx
+```
+
+终端报告登录保护同时依赖 `server.js` 的登录 Cookie。首次上线自动取图功能时还需执行：
+
+```bash
+pm2 restart zeosite-api
 ```
 
 ### 场景 E：更新智能排班生成器

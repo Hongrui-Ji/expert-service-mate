@@ -54,6 +54,8 @@ cd reporttowuye
 python3 -m venv .venv
 ./.venv/bin/pip install --upgrade pip
 ./.venv/bin/pip install -r requirements.txt
+sudo ./.venv/bin/python -m playwright install-deps chromium
+./.venv/bin/python -m playwright install chromium
 cd ..
 
 echo "部署智能排班生成器 (Streamlit)..."
@@ -66,6 +68,11 @@ cd ..
 echo "准备智能排班共享配置目录..."
 sudo mkdir -p /var/lib/zeosite/auto-scheduler
 sudo chown -R $USER:$USER /var/lib/zeosite/auto-scheduler
+
+echo "准备终端报告登录态目录..."
+sudo mkdir -p /var/lib/zeosite/terminal-report
+sudo chown -R $USER:$USER /var/lib/zeosite/terminal-report
+chmod 700 /var/lib/zeosite/terminal-report
 
 # 5. 配置 Nginx
 echo "配置 Nginx..."
@@ -80,6 +87,15 @@ pm2 start server.js --name "zeosite-api"
 
 echo "启动终端监测报告服务..."
 pm2 delete zeosite-terminal-report 2>/dev/null || true
+TERMINAL_REPORT_ENV_FILE="/var/lib/zeosite/terminal-report/config.env"
+if [ -f "$TERMINAL_REPORT_ENV_FILE" ]; then
+    set -a
+    source "$TERMINAL_REPORT_ENV_FILE"
+    set +a
+else
+    echo "警告：未找到 $TERMINAL_REPORT_ENV_FILE，自动获取图片功能将暂不可用"
+fi
+export YANSHOU_STATE_PATH="/var/lib/zeosite/terminal-report/yanshou-storage-state.json"
 pm2 start "./.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501 --server.baseUrlPath workspace/terminal-report --server.maxUploadSize 10 --server.headless true" --name "zeosite-terminal-report" --cwd "$APP_DIR/reporttowuye"
 
 echo "启动现场作业报告服务..."

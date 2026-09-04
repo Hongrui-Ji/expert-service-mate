@@ -1,5 +1,6 @@
 import streamlit as st
 from fpdf import FPDF
+import io
 import tempfile
 import os
 import re
@@ -9,6 +10,14 @@ import matplotlib.pyplot as plt
 import matplotlib
 from matplotlib.font_manager import FontProperties
 from matplotlib.ticker import MaxNLocator
+
+from monitoring_api import MonitoringAPIError, client_from_environment
+from yanshou_session import (
+    YanshouAuthRequired,
+    YanshouBrowserMissing,
+    YanshouError,
+    YanshouSession,
+)
 
 # 设置 matplotlib 后端
 matplotlib.use('Agg')
@@ -167,6 +176,8 @@ class PDF(FPDF):
 
     def process_image_with_watermark(self, img_file, watermark_text):
         try:
+            if hasattr(img_file, "seek"):
+                img_file.seek(0)
             image = Image.open(img_file)
             if image.mode in ("RGBA", "P"): image = image.convert("RGB")
             
@@ -413,6 +424,47 @@ def prepare_image_data(files, base_date, interval_mins, mode, base_time_obj=None
         
     return result, current_time
 
+
+def prepare_remote_image_data(items, base_date):
+    grouped = {"mouse": [], "roach": [], "fly": []}
+    for item in items:
+        image_file = io.BytesIO(item["content"])
+        captured_at = item.get("captured_at")
+        capture_time = datetime.fromisoformat(captured_at) if captured_at else None
+        time_suffix = capture_time.strftime("%H%M") if capture_time else "0000"
+        image_file.name = f"{item['device_id']}_{time_suffix}.jpg"
+        grouped[item["category"]].append(
+            {
+                "file": image_file,
+                "caption": item["point_name"],
+                "watermark_text": (
+                    capture_time.strftime("%Y-%m-%d %H:%M")
+                    if capture_time
+                    else f"{base_date} 00:00"
+                ),
+                "device_id": item["device_id"],
+                "source": "remote",
+            }
+        )
+    return grouped
+
+
+def serialize_remote_image(record, content):
+    # 在进入会话状态前验证图片，避免错误页或损坏文件进入 PDF。
+    with Image.open(io.BytesIO(content)) as image:
+        image.verify()
+    return {
+        "store_id": record.store_id,
+        "store_name": record.store_name,
+        "device_id": record.device_id,
+        "point_name": record.point_name,
+        "recognition_type": record.recognition_type,
+        "category": record.category,
+        "category_label": record.category_label,
+        "captured_at": record.captured_at.isoformat() if record.captured_at else None,
+        "content": content,
+    }
+
 # ==========================================
 # 4. Streamlit 前端界面
 # ==========================================
@@ -430,7 +482,14 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🛡️ PCO 远程监测报告生成器 V5.0 (Smart)")
+st.title("🛡️ PCO 远程监测报告生成器 V6.0 (Auto)")
+
+if "remote_images" not in st.session_state:
+    st.session_state.remote_images = []
+if "remote_fetch_key" not in st.session_state:
+    st.session_state.remote_fetch_key = ""
+if "yanshou_auth_status" not in st.session_state:
+    st.session_state.yanshou_auth_status = None
 
 with st.sidebar:
     st.header("⚙️ 全局配置")
@@ -477,17 +536,18 @@ with st.sidebar:
         except:
             fixed_time_obj = datetime.now()
 
-    st.info("💡 文件名时间优先：如 `点位_1430.jpg` 将强制使用文件名中的 14:30，日期跟随全局日期。")
+    st.info("💡 自动获取使用终端真实拍摄时间；手动上传时，文件名如 `点位_1430.jpg` 会使用其中的 14:30。")
     st.divider()
     if not os.path.exists("SimHei.ttf"): st.error("❌ 缺失 SimHei.ttf")
 
 # 调整 3：移除了 st.form，实现了实时交互
 st.markdown("### 1. 监测基础信息")
 with st.container():
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     with c1: client_name = st.text_input("客户名称", value="一图牛排小火锅")
-    with c2: store_name = st.text_input("门店名称", value="北京朝阳大悦城店")
-    with c3: service_type = st.selectbox("服务类型", ["智能监测服务", "专项远程诊断"])
+    with c2: store_id = st.text_input("门店 ID", value="", placeholder="例如：944217")
+    with c3: store_name = st.text_input("门店名称", value="北京朝阳大悦城店")
+    with c4: service_type = st.selectbox("服务类型", ["智能监测服务", "专项远程诊断"])
     
     c4, c5 = st.columns(2)
     with c4: staff_name = st.text_input("监测专员", value="远程中心-张三")
@@ -501,21 +561,151 @@ with st.container():
     with tc3: trend_fly_str = st.text_input("🦟 飞虫数据", value="5, 3, 2, 1, 0")
 
 st.markdown("### 3. 终端回传影像 & 风险标记")
-st.info("👇 上传图片后，下方将**立即**显示风险勾选框，无需等待生成。")
+image_source = st.radio(
+    "图片来源",
+    ["自动获取", "手动上传"],
+    horizontal=True,
+    help="自动获取会按终端 ID 去重，每个终端只保留报告日期当天最新的一张图片。",
+)
 
-col_img1, col_img2, col_img3 = st.columns(3)
-with col_img1: imgs_mouse = st.file_uploader("🐭 粘鼠板监测图", type=['png', 'jpg'], accept_multiple_files=True, key="m")
-with col_img2: imgs_roach = st.file_uploader("🪳 蟑螂屋监测图", type=['png', 'jpg'], accept_multiple_files=True, key="r")
-with col_img3: imgs_fly = st.file_uploader("🦟 灭蝇灯监测图", type=['png', 'jpg'], accept_multiple_files=True, key="f")
+processed_mouse, processed_roach, processed_fly = [], [], []
+effective_store_name = store_name
 
-# --- 实时处理图片逻辑 (移出表单) ---
-mode_key = "sequence" if watermark_mode == "智能序列 (推荐)" else "fixed"
-start_obj = seq_start_time if mode_key == "sequence" else fixed_time_obj
-interv = interval if mode_key == "sequence" else 0
+if image_source == "自动获取":
+    st.info("按门店 ID 和报告日期获取图片；同一终端当天有多张图片时，只使用拍摄时间最新的一张。")
+    yanshou = YanshouSession()
+    auth_status = st.session_state.yanshou_auth_status
+    if auth_status is None:
+        auth_status = yanshou.check_authenticated() if yanshou.has_saved_state() else False
+        st.session_state.yanshou_auth_status = auth_status
+    if auth_status is True:
+        st.success("✅ 验收系统已登录")
+    elif auth_status is False:
+        st.warning("⚠️ 验收系统尚未登录或登录已过期")
+    else:
+        st.caption("验收登录状态尚未检测")
 
-processed_mouse, next_time = prepare_image_data(imgs_mouse, base_date_str, interv, mode_key, start_obj)
-processed_roach, next_time = prepare_image_data(imgs_roach, base_date_str, interv, mode_key, next_time)
-processed_fly, _ = prepare_image_data(imgs_fly, base_date_str, interv, mode_key, next_time)
+    auth_col1, auth_col2, fetch_col = st.columns([1, 1, 2])
+    with auth_col1:
+        if st.button("检查登录状态", use_container_width=True):
+            with st.spinner("正在检查验收登录状态…"):
+                st.session_state.yanshou_auth_status = yanshou.check_authenticated()
+            st.rerun()
+
+    with auth_col2:
+        login_clicked = st.button("钉钉扫码登录", use_container_width=True)
+
+    if login_clicked:
+        qr_slot = st.empty()
+        status_slot = st.empty()
+
+        def show_qr(image_bytes):
+            qr_slot.image(image_bytes, caption="请使用钉钉扫码登录验收系统", width=420)
+
+        def show_login_status(message):
+            status_slot.info(message)
+
+        try:
+            yanshou.login_with_qr(show_qr, show_login_status)
+            st.session_state.yanshou_auth_status = True
+            st.success("扫码登录成功，未来 7 天将自动复用本次登录状态。")
+            st.rerun()
+        except (YanshouBrowserMissing, YanshouError) as exc:
+            st.session_state.yanshou_auth_status = False
+            st.error(str(exc))
+
+    with fetch_col:
+        fetch_clicked = st.button("获取当日最新终端图片", type="primary", use_container_width=True)
+
+    if fetch_clicked:
+        if not store_id.strip():
+            st.error("请先填写门店 ID")
+        else:
+            try:
+                with st.spinner("正在查询终端并下载最新图片…"):
+                    client = client_from_environment()
+                    records, raw_count, duplicate_count = client.fetch_latest_images(service_date, store_id)
+                    if records:
+                        contents = yanshou.download_images(item.resolver_url for item in records)
+                        remote_images = [
+                            serialize_remote_image(record, content)
+                            for record, content in zip(records, contents, strict=True)
+                        ]
+                    else:
+                        remote_images = []
+
+                st.session_state.remote_images = remote_images
+                st.session_state.remote_fetch_key = f"{base_date_str}:{store_id.strip()}"
+                if remote_images:
+                    st.session_state.yanshou_auth_status = True
+                    matched_name = remote_images[0]["store_name"]
+                    st.success(
+                        f"已匹配 {matched_name}：原始 {raw_count} 张，"
+                        f"过滤同终端较早图片 {duplicate_count} 张，保留 {len(remote_images)} 张最新图片。"
+                    )
+                else:
+                    st.info("该门店在报告日期当天没有监测图片。")
+            except MonitoringAPIError as exc:
+                st.error(str(exc))
+            except YanshouAuthRequired as exc:
+                st.session_state.yanshou_auth_status = False
+                st.warning(str(exc))
+            except (YanshouError, OSError) as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"图片读取失败：{exc}")
+
+    current_fetch_key = f"{base_date_str}:{store_id.strip()}"
+    if st.session_state.remote_fetch_key == current_fetch_key:
+        remote_images = st.session_state.remote_images
+    else:
+        remote_images = []
+        if st.session_state.remote_images:
+            st.warning("门店 ID 或报告日期已变化，请重新获取图片。")
+
+    if remote_images:
+        effective_store_name = remote_images[0]["store_name"] or store_name
+        grouped = prepare_remote_image_data(remote_images, base_date_str)
+        processed_mouse = grouped["mouse"]
+        processed_roach = grouped["roach"]
+        processed_fly = grouped["fly"]
+
+        preview_cols = st.columns(3)
+        labels = {
+            "mouse": "🐭 粘鼠板",
+            "roach": "🪳 蟑螂屋",
+            "fly": "🦟 灭蝇灯",
+        }
+        for index, category in enumerate(("mouse", "roach", "fly")):
+            category_items = [item for item in remote_images if item["category"] == category]
+            with preview_cols[index]:
+                st.markdown(f"**{labels[category]} · {len(category_items)} 张**")
+                for item in category_items:
+                    captured = item.get("captured_at")
+                    captured_text = datetime.fromisoformat(captured).strftime("%H:%M") if captured else "时间未知"
+                    st.image(
+                        item["content"],
+                        caption=f"{item['point_name']} · {captured_text}",
+                        use_container_width=True,
+                    )
+    else:
+        if st.session_state.remote_fetch_key == current_fetch_key and store_id.strip():
+            st.caption("（已查询：该门店当天没有监测图片）")
+        else:
+            st.caption("（尚未获取终端图片）")
+else:
+    st.info("👇 上传图片后，下方将立即显示风险勾选框，无需等待生成。")
+    col_img1, col_img2, col_img3 = st.columns(3)
+    with col_img1: imgs_mouse = st.file_uploader("🐭 粘鼠板监测图", type=['png', 'jpg'], accept_multiple_files=True, key="m")
+    with col_img2: imgs_roach = st.file_uploader("🪳 蟑螂屋监测图", type=['png', 'jpg'], accept_multiple_files=True, key="r")
+    with col_img3: imgs_fly = st.file_uploader("🦟 灭蝇灯监测图", type=['png', 'jpg'], accept_multiple_files=True, key="f")
+
+    mode_key = "sequence" if watermark_mode == "智能序列 (推荐)" else "fixed"
+    start_obj = seq_start_time if mode_key == "sequence" else fixed_time_obj
+    interv = interval if mode_key == "sequence" else 0
+    processed_mouse, next_time = prepare_image_data(imgs_mouse, base_date_str, interv, mode_key, start_obj)
+    processed_roach, next_time = prepare_image_data(imgs_roach, base_date_str, interv, mode_key, next_time)
+    processed_fly, _ = prepare_image_data(imgs_fly, base_date_str, interv, mode_key, next_time)
 
 all_processed_items = processed_mouse + processed_roach + processed_fly
 
@@ -532,7 +722,8 @@ if all_processed_items:
             # 使用 container 增加一点视觉隔离
             with st.container():
                 st.write(f"🖼️ **{point_name}** ({watermark})")
-                has_risk = st.checkbox(f"标记风险", key=f"risk_{item['file'].name}_{i}")
+                device_key = item.get("device_id") or item['file'].name
+                has_risk = st.checkbox(f"标记风险", key=f"risk_{device_key}_{i}")
                 
                 status_data = {
                     "name": point_name,
@@ -542,7 +733,7 @@ if all_processed_items:
                 }
                 areas_status.append(status_data)
 else:
-    st.caption("（暂无上传图片）")
+    st.caption("（暂无监测图片）")
 
 st.markdown("### 4. 监测结论与建议")
 suggestion_text = st.text_area("结构与卫生整改建议", value="1. 02号设备回传画面显示洗碗间地面有积水，建议及时清理。\n2. 03号设备夜间监测到仓库门未关严，建议加强闭店管理。", height=80)
@@ -588,7 +779,7 @@ if submitted:
                 pdf.draw_section_header("监测基础信息")
                 info_data = {
                     "客户名称": client_name, "报告日期": base_date_str, # 使用全局日期
-                    "门店名称": store_name, "监测专员": staff_name,
+                    "门店名称": effective_store_name, "监测专员": staff_name,
                     "门店地址": address, "服务类型": service_type
                 }
                 pdf.draw_info_box(info_data)
@@ -653,7 +844,7 @@ if submitted:
                 st.download_button(
                     label="📥 下载 PDF 报告",
                     data=pdf_output,
-                    file_name=f"PCO报告_{store_name}_{file_date_suffix}.pdf",
+                    file_name=f"PCO报告_{effective_store_name}_{file_date_suffix}.pdf",
                     mime="application/pdf"
                 )
                 

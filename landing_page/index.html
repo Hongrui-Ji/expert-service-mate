@@ -14,9 +14,17 @@
     <div id="app"></div>
 
     <script>
-        const API_BASE = (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+        if (window.location.protocol === 'file:') {
+            window.location.replace('http://localhost:3000/workspace/');
+        }
+
+        const IS_LOCAL_HOST = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+        const API_BASE = IS_LOCAL_HOST
             ? 'http://localhost:3000/api'
             : '/api';
+        const TERMINAL_REPORT_URL = IS_LOCAL_HOST
+            ? 'http://localhost:8501/'
+            : '/workspace/terminal-report/';
         const AUTH_KEY = 'auth_user';
         const app = document.getElementById('app');
 
@@ -148,7 +156,12 @@
             }
         }
 
-        function handleLogout() {
+        async function handleLogout() {
+            try {
+                await fetch(`${API_BASE}/auth/logout`, { method: 'POST' });
+            } catch {
+                // 本地登录状态仍需立即清除。
+            }
             clearUser();
             render();
             showToast('已退出登录', 'info');
@@ -426,7 +439,7 @@
                                     icon: '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="4" rx="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/></svg>'
                                 })}
                                 ${moduleCard({
-                                    href: '/workspace/terminal-report/',
+                                    href: TERMINAL_REPORT_URL,
                                     tone: 'indigo',
                                     title: '终端监测报告',
                                     desc: '针对需要多次报告的门店，生成终端监测报告。',

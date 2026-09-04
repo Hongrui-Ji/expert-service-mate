@@ -329,7 +329,12 @@ export default function App() {
     }
   }, [user]);
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      await fetch(`${API_BASE}/auth/logout`, { method: 'POST' });
+    } catch {
+      // 即使网络异常，也立即清除本地登录状态。
+    }
     setUser(null);
     setCurrentUser('');
     localStorage.removeItem('auth_user');

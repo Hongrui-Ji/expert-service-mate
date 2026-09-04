@@ -2,3 +2,5 @@ streamlit
 fpdf
 pillow
 matplotlib
+requests>=2.31,<3
+playwright>=1.52,<2
