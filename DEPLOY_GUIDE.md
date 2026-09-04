@@ -176,7 +176,7 @@ sudo systemctl start nginx
 pm2 start server.js --name "zeosite-api"
 
 # 终端监测报告工具（Streamlit，部署在 /workspace/terminal-report/）
-pm2 start "./.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501 --server.baseUrlPath workspace/terminal-report --server.maxUploadSize 10 --server.headless true" --name "zeosite-terminal-report" --cwd /var/www/zeosite/reporttowuye
+pm2 start "./.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501 --server.baseUrlPath workspace/terminal-report --server.maxUploadSize 10 --server.headless true --browser.gatherUsageStats false" --name "zeosite-terminal-report" --cwd /var/www/zeosite/reporttowuye
 
 # 现场作业报告工具（独立公开页面，部署在 /onsite-report/）
 pm2 start "./.venv/bin/python -m streamlit run pco_onsite_report_app.py --server.address 127.0.0.1 --server.port 8502 --server.baseUrlPath onsite-report --server.maxUploadSize 10 --server.headless true" --name "zeosite-onsite-report" --cwd /var/www/zeosite/reporttowuye

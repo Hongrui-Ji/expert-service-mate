@@ -96,7 +96,7 @@ else
     echo "警告：未找到 $TERMINAL_REPORT_ENV_FILE，自动获取图片功能将暂不可用"
 fi
 export YANSHOU_STATE_PATH="/var/lib/zeosite/terminal-report/yanshou-storage-state.json"
-pm2 start "./.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501 --server.baseUrlPath workspace/terminal-report --server.maxUploadSize 10 --server.headless true" --name "zeosite-terminal-report" --cwd "$APP_DIR/reporttowuye"
+pm2 start "./.venv/bin/python -m streamlit run app.py --server.address 127.0.0.1 --server.port 8501 --server.baseUrlPath workspace/terminal-report --server.maxUploadSize 10 --server.headless true --browser.gatherUsageStats false" --name "zeosite-terminal-report" --cwd "$APP_DIR/reporttowuye"
 
 echo "启动现场作业报告服务..."
 pm2 delete zeosite-onsite-report 2>/dev/null || true

@@ -587,13 +587,13 @@ if image_source == "自动获取":
 
     auth_col1, auth_col2, fetch_col = st.columns([1, 1, 2])
     with auth_col1:
-        if st.button("检查登录状态", use_container_width=True):
+        if st.button("检查登录状态", width="stretch"):
             with st.spinner("正在检查验收登录状态…"):
                 st.session_state.yanshou_auth_status = yanshou.check_authenticated()
             st.rerun()
 
     with auth_col2:
-        login_clicked = st.button("钉钉扫码登录", use_container_width=True)
+        login_clicked = st.button("钉钉扫码登录", width="stretch")
 
     if login_clicked:
         qr_slot = st.empty()
@@ -615,7 +615,7 @@ if image_source == "自动获取":
             st.error(str(exc))
 
     with fetch_col:
-        fetch_clicked = st.button("获取当日最新终端图片", type="primary", use_container_width=True)
+        fetch_clicked = st.button("获取当日最新终端图片", type="primary", width="stretch")
 
     if fetch_clicked:
         if not store_id.strip():
@@ -686,7 +686,7 @@ if image_source == "自动获取":
                     st.image(
                         item["content"],
                         caption=f"{item['point_name']} · {captured_text}",
-                        use_container_width=True,
+                        width="stretch",
                     )
     else:
         if st.session_state.remote_fetch_key == current_fetch_key and store_id.strip():
