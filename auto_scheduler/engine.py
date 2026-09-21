@@ -29,28 +29,55 @@ class ProductionScheduler(AutoSchedulerV2):
     def __init__(self, config: dict[str, Any], *, shared_capacity: dict[str, Any] | None = None):
         super().__init__(config)
         self.conflicts: list[dict[str, Any]] = []
+        # 记录「每个自然日、每个人」已经占过日额度的宿舍组：
+        # 同一宿舍组在同一自然日只占 1 个额度（一次出勤跑完多个宿舍）。
+        self.person_day_slot_groups: dict[int, defaultdict[str, set[str]]] = {
+            day: defaultdict(set) for day in range(1, self.days_in_month + 1)
+        }
         if shared_capacity is not None:
             self.person_day_order_stats = shared_capacity["days"]
             self.person_week_order_stats = shared_capacity["weeks"]
 
+    def _monthly_workday_limit(self) -> int:
+        return int(self.cfg.get("MAX_MONTHLY_WORKDAYS_PER_PERSON", 25))
+
+    def _person_workday_count(self, person: str) -> int:
+        return sum(
+            1
+            for day in range(1, self.days_in_month + 1)
+            if self.person_day_order_stats[day].get(person, 0) > 0
+        )
+
+    def _day_slot_cost(self, day: int, person: str, item: dict[str, Any]) -> int:
+        """本条工单在该自然日占用的日工单额度（同一宿舍组重复出勤时为 0）。"""
+        group = self._dorm_group_of(item)
+        if group is None:
+            return 1
+        if group in self.person_day_slot_groups[day].get(person, set()):
+            return 0
+        return 1
+
     def _check_person_order_constraint(self, day, item, allow_relaxed=False):
+        """日容量 + 周容量 + 每月工作日上限三重校验。
+
+        `allow_relaxed` 仅为兼容旧调用签名保留。
+        """
         person = self._get_service_person(item)
         if not person:
             return True
 
-        strict_limit = int(self.cfg.get("MAX_DAILY_ORDERS_PER_PERSON", 2))
-        relaxed_limit = int(self.cfg.get("MAX_DAILY_ORDERS_PER_PERSON_RELAXED", 3))
-        relaxed_before_day = int(self.cfg.get("RELAXED_CAP_BEFORE_DAY", 20))
+        daily_limit = int(self.cfg.get("MAX_DAILY_ORDERS_PER_PERSON", 4))
         current_day = self.person_day_order_stats[day].get(person, 0)
+        slot_cost = self._day_slot_cost(day, person, item)
+        if current_day + slot_cost > daily_limit:
+            return False
 
-        daily_allowed = current_day < strict_limit
-        if not daily_allowed and allow_relaxed and day <= relaxed_before_day:
-            daily_allowed = current_day < relaxed_limit
-        if not daily_allowed:
+        # 该日对该专家还是空白日：会新开一个工作日，受每月工作日上限约束
+        if current_day == 0 and self._person_workday_count(person) >= self._monthly_workday_limit():
             return False
 
         week_index = self._get_week_index(day)
-        weekly_limit = float(self.cfg.get("MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON", 6.0))
+        weekly_limit = float(self.cfg.get("MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON", 25.0))
         current_week = self.person_week_order_stats[week_index].get(person, 0.0)
         return current_week + 1 <= weekly_limit + 1e-9
 
@@ -76,8 +103,7 @@ class ProductionScheduler(AutoSchedulerV2):
             return None, used_relaxed
         if anchor_day is None:
             anchor_day = allowed_days[0]
-        ordered = self._sort_days_by_smoothing(allowed_days, item, anchor_day)
-        return (ordered[0] if ordered else None), used_relaxed
+        return self._pick_balanced_day(allowed_days, item, anchor_day), used_relaxed
 
     def _align_range_window(
         self,
@@ -86,7 +112,6 @@ class ProductionScheduler(AutoSchedulerV2):
         item,
         enforce_weekly_capacity=False,
         min_gap_days=0,
-        allow_window_shift=True,
         preferred_service_day=None,
     ):
         result = super()._align_range_window(
@@ -95,11 +120,10 @@ class ProductionScheduler(AutoSchedulerV2):
             item,
             enforce_weekly_capacity=False,
             min_gap_days=min_gap_days,
-            allow_window_shift=allow_window_shift,
             preferred_service_day=preferred_service_day,
         )
         aligned_start, aligned_end, service_day, adjusted, moved, used_relaxed = result
-        if not self._check_person_order_constraint(service_day, item, allow_relaxed=True):
+        if not self._check_person_order_constraint(service_day, item):
             service_day = None
         return aligned_start, aligned_end, service_day, adjusted, moved, used_relaxed
 
@@ -148,7 +172,7 @@ class ProductionScheduler(AutoSchedulerV2):
                 enforce_daily_capacity=True,
             )
 
-        if service_day is None or not self._check_person_order_constraint(service_day, item, allow_relaxed=True):
+        if service_day is None or not self._check_person_order_constraint(service_day, item):
             self._record_conflict(
                 start_day,
                 end_day,
@@ -167,9 +191,16 @@ class ProductionScheduler(AutoSchedulerV2):
             self._record_conflict(start_day, end_day, item, rule_note, "与同一门店的其他服务日期间隔不足")
             return False
 
-        used_relaxed = not self._check_person_order_constraint(service_day, item, allow_relaxed=False)
-        if used_relaxed and "放宽3单" not in rule_note:
-            rule_note += "-20日前放宽3单"
+        person = self._get_service_person(item)
+        repeated_dorm_group = False
+        if person:
+            group = self._dorm_group_of(item)
+            if group is not None:
+                day_groups = self.person_day_slot_groups[service_day][person]
+                if group in day_groups:
+                    repeated_dorm_group = True
+                else:
+                    day_groups.add(group)
 
         super()._assign(
             start_day,
@@ -181,9 +212,11 @@ class ProductionScheduler(AutoSchedulerV2):
             remote_day=service_day,
             load_mode="daily",
         )
-        person = self._get_service_person(item)
         if person:
             self.person_week_order_stats[self._get_week_index(service_day)][person] += 1
+            if repeated_dorm_group:
+                # 同一宿舍组当天重复出勤不再额外占用日额度
+                self.person_day_order_stats[service_day][person] -= 1
         return True
 
 

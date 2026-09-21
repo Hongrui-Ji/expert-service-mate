@@ -29,20 +29,20 @@ DEFAULT_CONFIG = {
     "PROVINCE_COL": "省份",                  # [新增] 合并输入文件中的省份字段名
     "OUTPUT_SPLIT_BY_PROVINCE": True,      # [新增] True时按省份分Sheet输出
     "OUTPUT_SPLIT_BY_CITY":False,          # [兼容] 旧开关，当前多省份方案默认不使用
-    "SOFT_ANCHOR_TOLERANCE": 5,            # “上次+30天”软约束容忍天数（±N天）
     # [优化] 补充了昆山等常见周边城市，确保逻辑覆盖
     "REMOTE_CITIES": ['张家港市','太仓市','常熟市',"崇明区","金山区",'慈溪市','瑞安市',"密云区"], 
     
     # [品牌配置]
     "SPECIFIC_DATE_BRANDS": ['嘻游记'], # 指定锁定单日的品牌配置，可自由添加多个
     "SPECIFIC_RANGE_BRANDS": ['塔斯汀中国汉堡',"半天妖烤鱼","GridCoffee","鱼酷活力烤鱼"], # [新增] 指定3天范围的品牌配置（截止锚定上次+30天）
+    # [宿舍配置] 门店名称包含这些关键词即视为宿舍；同一主门店下的宿舍合并成一次出勤
+    "DORM_KEYWORDS": ['宿舍'],
 
     # [限制配置]
-    "MAX_DAILY_ORDERS_PER_PERSON": 2,  # 每位服务人员每天最多2个工单（默认上限）
-    "MAX_DAILY_ORDERS_PER_PERSON_RELAXED": 3,  # 排不开时的放宽上限
-    "RELAXED_CAP_BEFORE_DAY": 20,  # 仅允许在当月20号（含）之前使用放宽上限
-    "MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON": 6.0,  # 常规/季度按自然周分摊后的每周容量上限
-    "NEARBY_ALIGN_RADIUS_METERS": 300,  # 同服务人员下，附近门店尽量同日的默认距离
+    "MAX_DAILY_ORDERS_PER_PERSON": 4,  # 每位服务人员每天最多4个工单
+    "MAX_MONTHLY_WORKDAYS_PER_PERSON": 25,  # 每位服务人员每月最多出勤的工作日数
+    "MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON": 25.0,  # 每位服务人员每周容量上限
+    "NEARBY_ALIGN_RADIUS_METERS": 150,  # 同服务人员下，附近门店尽量同日的默认距离
     "SMOOTHING_ANCHOR_WEIGHT": 10,  # 刚性单平滑：锚点偏离权重
     "SMOOTHING_DAY_LOAD_WEIGHT": 8,  # 刚性单平滑：当日负载权重
     "SMOOTHING_NEIGHBOR_LOAD_WEIGHT": 4,  # 刚性单平滑：相邻日负载权重
@@ -53,7 +53,6 @@ DEFAULT_CONFIG = {
     "REGULAR_MIN_GAP_DAYS_FREQ2": 10,  # 常规/季度门店频次=2时，同店两次服务最小间隔
     "REGULAR_MIN_GAP_DAYS_FREQ3": 7,  # 常规/季度门店频次=3时，同店相邻两次服务最小间隔
     "REGULAR_MIN_GAP_DAYS_FREQ4PLUS": 5,  # 常规/季度门店频次>=4时，同店相邻两次服务最小间隔
-    "REMOTE_MAX_SHIFT_DAYS": 3,  # 偏远门店窗口最大顺移天数（相对原起点）
     "BRAND_RANGE_MAX_HOLIDAY_DAYS": 1,  # 3天范围门店窗口内最多允许的假期天数
 
     # [服务窗口长度] 含首尾自然日天数（如 16 表示从 start 到 start+15 共 16 天）
@@ -148,6 +147,24 @@ class AutoSchedulerV2:
     def _get_service_person(self, item):
         return self._normalize_text(item.get(self.cfg["SERVICE_PERSON_COL"], ""))
 
+    def _dorm_group_of(self, item):
+        """宿舍门店返回「同一主门店」的组标识，非宿舍返回 None。
+
+        例如「XX店-宿舍1」「XX店-宿舍2」归到同一组，
+        同一组在同一自然日只占 1 个日工单额度（一次出勤跑完多个宿舍）。
+        """
+        keywords = self.cfg.get("DORM_KEYWORDS") or []
+        if not keywords:
+            return None
+        name = str(item.get("门店名称", "") or "")
+        for keyword in keywords:
+            index = name.find(keyword)
+            if index < 0:
+                continue
+            base = name[:index].rstrip(" -—－_　（）()[]【】")
+            return f"{self._get_service_person(item)}|{base or name}"
+        return None
+
     def _get_coords(self, item):
         lat = self._safe_float(item.get(self.cfg["LAT_COL"]))
         lng = self._safe_float(item.get(self.cfg["LNG_COL"]))
@@ -223,33 +240,6 @@ class AutoSchedulerV2:
                 key=lambda kv: (-kv[1], abs(kv[0] - anchor_day), kv[0])
             )
         ]
-
-    def _build_window_start_order(self, start_day, window_len, item):
-        max_start = max(1, self.days_in_month - window_len + 1)
-        base_order = []
-        seen = set()
-        for day in self._build_nearby_day_order(start_day):
-            candidate = min(max(1, day), max_start)
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            base_order.append(candidate)
-
-        counter = self._get_related_day_counter(item)
-        if not counter:
-            return base_order
-
-        preferred = []
-        for related_day, _count in sorted(counter.items(), key=lambda kv: (-kv[1], abs(kv[0] - start_day), kv[0])):
-            candidates = [
-                related_day - window_len // 2,
-                related_day - window_len + 1,
-                related_day,
-            ]
-            for candidate in candidates:
-                candidate = min(max(1, candidate), max_start)
-                preferred.append(candidate)
-        return self._merge_preferred_days(preferred, base_order)
 
     def _get_person_order_count(self, day, item):
         person = self._get_service_person(item)
@@ -350,11 +340,11 @@ class AutoSchedulerV2:
 
     def _plan_brand_range_window(self, anchor_day, item, allowed_end_days=None, min_gap_days=0):
         max_holiday_days = int(self.cfg.get("BRAND_RANGE_MAX_HOLIDAY_DAYS", 1))
-        candidate_ends = self._build_soft_order(anchor_day, int(self.cfg.get("SOFT_ANCHOR_TOLERANCE", 5)))
+        candidate_ends = self._days_by_anchor_distance(anchor_day)
         preferred_days = self._get_preferred_days_for_item(item, anchor_day=anchor_day)
         candidate_ends = self._merge_preferred_days(candidate_ends, preferred_days)
         candidate_ends, used_relaxed = self._filter_days_by_order_capacity(candidate_ends, item)
-        candidate_ends = self._sort_days_by_smoothing(candidate_ends, item, anchor_day)
+        candidate_ends = sorted(candidate_ends, key=lambda d: self._anchored_balance_key(d, item, anchor_day))
         allowed_set = set(allowed_end_days) if allowed_end_days else None
 
         best_fallback = None
@@ -453,27 +443,78 @@ class AutoSchedulerV2:
         return True
 
     def _check_person_order_constraint(self, day, item, allow_relaxed=False):
+        """日容量校验。`allow_relaxed` 仅为兼容旧调用签名保留，已不再有放宽档位。"""
         person = self._get_service_person(item)
         if not person:
             return True
-
-        strict_limit = int(self.cfg.get("MAX_DAILY_ORDERS_PER_PERSON", 2))
-        relaxed_limit = int(self.cfg.get("MAX_DAILY_ORDERS_PER_PERSON_RELAXED", 3))
-        relaxed_before_day = int(self.cfg.get("RELAXED_CAP_BEFORE_DAY", 20))
-        curr_count = self._get_person_order_count(day, item)
-
-        if curr_count < strict_limit:
-            return True
-        if allow_relaxed and day <= relaxed_before_day and curr_count < relaxed_limit:
-            return True
-        return False
+        daily_limit = int(self.cfg.get("MAX_DAILY_ORDERS_PER_PERSON", 4))
+        return self._get_person_order_count(day, item) < daily_limit
 
     def _filter_days_by_order_capacity(self, days, item):
-        strict_days = [d for d in days if self._check_person_order_constraint(d, item, allow_relaxed=False)]
-        if strict_days:
-            return strict_days, False
-        relaxed_days = [d for d in days if self._check_person_order_constraint(d, item, allow_relaxed=True)]
-        return relaxed_days, True
+        """返回 (容量可行日, used_relaxed)。第二个返回值恒为 False，保留以兼容调用方。"""
+        return [d for d in days if self._check_person_order_constraint(d, item)], False
+
+    def _balance_key(self, day, item, preferred_day):
+        """窗口型规则的选日排序键（常规 / 季度 / 特殊要求候选日）。
+
+        顺序：同一天凑单信号 → 当天负载 → 相邻日负载 → 离锚点距离 → 日期。
+
+        「同一天凑单信号」= 近邻（≤150 米）门店数 + 同一主门店已排的宿舍数，
+        让同一商场里的门店并到同一天跑（省路上时间）。
+        之后按当天/相邻日负载摊开，避免把单日额度提前占满；
+        每月工作日数量由「每月工作日上限」这条硬约束兜底。
+        业务锚点排在后面，但候选日始终取自业务窗口内部，不会越出窗口。
+        """
+        same_day_load = self._get_person_order_count(day, item)
+        return (
+            -self._same_day_score(day, item),
+            same_day_load,
+            self._get_neighbor_load(day, item),
+            abs(day - preferred_day),
+            day,
+        )
+
+    def _dorm_group_day_count(self, day, item):
+        """该日已经排过的、与本条工单属于同一主门店的宿舍数量。"""
+        group = self._dorm_group_of(item)
+        if group is None:
+            return 0
+        person = self._get_service_person(item)
+        return sum(
+            1
+            for point in self.assignment_points_by_person.get(person, [])
+            if point.get('service_day') == day and point.get('dorm_group') == group
+        )
+
+    def _same_day_score(self, day, item):
+        """「值得凑到同一天」的信号强度：近邻门店数 + 同一主门店已排的宿舍数。
+
+        宿舍之间存在 200~600 米的距离，超过近邻半径，因此需要单独计入同组信号，
+        否则同一主门店的宿舍会被拆到多天。
+        """
+        return self._get_related_day_counter(item, day, day).get(day, 0) + self._dorm_group_day_count(day, item)
+
+    def _pick_balanced_day(self, days, item, preferred_day=None):
+        """在候选日里挑负载最均衡的一天，避免月初/锚点附近扎堆。"""
+        if not days:
+            return None
+        if preferred_day is None:
+            preferred_day = days[0]
+        return min(days, key=lambda d: self._balance_key(d, item, preferred_day))
+
+    def _anchored_balance_key(self, day, item, anchor_day):
+        """锚点型规则的排序键（品牌单日、三日范围品牌）。
+
+        这类规则的日期来自「上次服务日 + 周期」的业务锚点，窗口是跟着锚点走的，
+        因此必须先守住锚点，只在同等锚点距离里挑负载更轻的日子。
+        """
+        return (
+            abs(day - anchor_day),
+            self._get_person_order_count(day, item),
+            self._get_neighbor_load(day, item),
+            -self._get_related_day_counter(item, day, day).get(day, 0),
+            day,
+        )
 
     def _pick_service_day_in_window(self, start_day, end_day, item, preferred_day=None, enforce_daily_capacity=True, min_gap_days=0):
         day_order = self._build_window_day_order(start_day, end_day, preferred_day)
@@ -484,12 +525,12 @@ class AutoSchedulerV2:
             return None, False
 
         if not enforce_daily_capacity:
-            return day_order[0], False
+            return self._pick_balanced_day(day_order, item, preferred_day), False
 
         allowed_days, used_relaxed = self._filter_days_by_order_capacity(day_order, item)
         if not allowed_days:
             return None, used_relaxed
-        return allowed_days[0], used_relaxed
+        return self._pick_balanced_day(allowed_days, item, preferred_day), used_relaxed
 
     def _register_assignment_point(self, item, service_day):
         service_person = self._get_service_person(item)
@@ -502,6 +543,7 @@ class AutoSchedulerV2:
             'lat': lat,
             'lng': lng,
             'service_day': service_day,
+            'dorm_group': self._dorm_group_of(item),
         })
 
     def _register_assignment_window(self, item, start_day, end_day):
@@ -805,19 +847,12 @@ class AutoSchedulerV2:
         if not days:
             return None, False
 
-        strict_days = [d for d in days if self._check_person_order_constraint(d, item, allow_relaxed=False)]
-        used_relaxed = False
-        if not strict_days:
-            relaxed_days = [d for d in days if self._check_person_order_constraint(d, item, allow_relaxed=True)]
-            if relaxed_days:
-                strict_days = relaxed_days
-                used_relaxed = True
-            else:
-                strict_days = days
+        allowed_days, used_relaxed = self._filter_days_by_order_capacity(days, item)
+        if not allowed_days:
+            return None, used_relaxed
         if anchor_day is None:
-            anchor_day = strict_days[0]
-        sorted_days = self._sort_days_by_smoothing(strict_days, item, anchor_day)
-        return sorted_days[0] if sorted_days else None, used_relaxed
+            anchor_day = allowed_days[0]
+        return self._pick_balanced_day(allowed_days, item, anchor_day), used_relaxed
 
     def _resolve_specified_rule_days(self, item):
         rule = item.get('specified_date_rule') or {'mode': 'none'}
@@ -946,33 +981,25 @@ class AutoSchedulerV2:
             return 1
         return min(max(1, last_date.day), self.days_in_month)
 
-    def _build_soft_order(self, anchor_day, tolerance):
-        days = list(range(1, self.days_in_month + 1))
-        in_band = [d for d in days if abs(d - anchor_day) <= tolerance]
-        out_band = [d for d in days if abs(d - anchor_day) > tolerance]
-        # 同距离时优先更早日期（由“偏晚”改为“偏早”）
-        in_band.sort(key=lambda d: (abs(d - anchor_day), d))
-        out_band.sort(key=lambda d: (abs(d - anchor_day), d))
-        return in_band + out_band
+    def _days_by_anchor_distance(self, anchor_day):
+        """全月日期按「离锚点距离，再按日期先后」排序。"""
+        return sorted(range(1, self.days_in_month + 1), key=lambda d: (abs(d - anchor_day), d))
 
     def _find_best_slot_soft(self, anchor_day, is_fixed_type, is_remote, item=None):
-        tolerance = int(self.cfg.get("SOFT_ANCHOR_TOLERANCE", 5))
-        search_order = self._build_soft_order(anchor_day, tolerance)
-        if item is not None:
-            preferred_days = self._get_preferred_days_for_item(item, anchor_day=anchor_day)
-            search_order = self._merge_preferred_days(search_order, preferred_days)
-            search_order, _ = self._filter_days_by_order_capacity(search_order, item)
-            if is_remote:
-                search_order = self._sort_remote_days_for_pairing(search_order, item, anchor_day)
-            else:
-                search_order = self._sort_days_by_smoothing(search_order, item, anchor_day)
-        for day in search_order:
-            if self._is_holiday(day):
-                continue
-            valid = True
-            if valid:
-                return day
-        return anchor_day
+        search_order = self._days_by_anchor_distance(anchor_day)
+        if item is None:
+            for day in search_order:
+                if not self._is_holiday(day):
+                    return day
+            return anchor_day
+
+        search_order, _ = self._filter_days_by_order_capacity(search_order, item)
+        search_order = [day for day in search_order if not self._is_holiday(day)]
+        if not search_order:
+            return anchor_day
+        if is_remote:
+            return self._sort_remote_days_for_pairing(search_order, item, anchor_day)[0]
+        return min(search_order, key=lambda d: self._anchored_balance_key(d, item, anchor_day))
 
     def _build_window_day_order(self, start_day, end_day, preferred_day=None):
         if preferred_day is None:
@@ -995,48 +1022,20 @@ class AutoSchedulerV2:
             return day
         return None
 
-    def _align_range_window(self, start_day, end_day, item, enforce_weekly_capacity=False, min_gap_days=0, allow_window_shift=True, preferred_service_day=None):
-        window_len = end_day - start_day + 1
+    def _align_range_window(self, start_day, end_day, item, enforce_weekly_capacity=False, min_gap_days=0, preferred_service_day=None):
+        """在固定窗口内挑一个服务锚点日；窗口本身不做整体平移。"""
         anchor_day = preferred_service_day if preferred_service_day is not None else start_day + (end_day - start_day) // 2
         anchor_day = min(max(start_day, int(anchor_day)), end_day)
-        best_candidate = None
 
         capacity_modes = [False, True] if enforce_weekly_capacity else [False]
         for relaxed_week_capacity in capacity_modes:
-            candidate_starts = self._build_window_start_order(start_day, window_len, item) if allow_window_shift else [start_day]
-            for candidate_start in candidate_starts:
-                candidate_end = candidate_start + window_len - 1
-                if (
-                    enforce_weekly_capacity
-                    and not relaxed_week_capacity
-                    and not self._check_person_week_capacity(candidate_start, candidate_end, item)
-                ):
-                    continue
-                service_day, used_relaxed = self._pick_service_day_in_window(
-                    candidate_start,
-                    candidate_end,
-                    item,
-                    preferred_day=min(max(candidate_start, anchor_day), candidate_end),
-                    enforce_daily_capacity=not enforce_weekly_capacity,
-                    min_gap_days=min_gap_days,
-                )
-                if service_day is None:
-                    continue
-                overlap_count = self._get_related_window_overlap_count(item, candidate_start, candidate_end)
-                score = (
-                    1 if relaxed_week_capacity else 0,  # 周容量不够时可放宽，但排在严格可行方案之后
-                    abs(candidate_start - start_day),  # 优先保持原业务窗口
-                    self._score_day_with_smoothing(service_day, item, anchor_day),  # 再考虑负载与锚点偏离
-                    -overlap_count,  # 近邻对齐仅作为同等条件下的最后加分
-                    candidate_start,
-                    service_day,
-                )
-                candidate = (score, candidate_start, candidate_end, service_day, used_relaxed, overlap_count)
-                if best_candidate is None or candidate < best_candidate:
-                    best_candidate = candidate
-
-        if best_candidate is None:
-            fallback_day, used_relaxed = self._pick_service_day_in_window(
+            if (
+                enforce_weekly_capacity
+                and not relaxed_week_capacity
+                and not self._check_person_week_capacity(start_day, end_day, item)
+            ):
+                continue
+            service_day, used_relaxed = self._pick_service_day_in_window(
                 start_day,
                 end_day,
                 item,
@@ -1044,41 +1043,37 @@ class AutoSchedulerV2:
                 enforce_daily_capacity=not enforce_weekly_capacity,
                 min_gap_days=min_gap_days,
             )
-            if fallback_day is None:
-                return start_day, end_day, start_day, False, False, False
-            return start_day, end_day, fallback_day, False, False, used_relaxed
+            if service_day is not None:
+                return start_day, end_day, service_day, False, False, used_relaxed
 
-        _, aligned_start, aligned_end, service_day, used_relaxed, _overlap_count = best_candidate
-        moved = aligned_start != start_day or aligned_end != end_day
-        return aligned_start, aligned_end, service_day, False, moved, used_relaxed
+        fallback_day, used_relaxed = self._pick_service_day_in_window(
+            start_day,
+            end_day,
+            item,
+            preferred_day=anchor_day,
+            enforce_daily_capacity=not enforce_weekly_capacity,
+            min_gap_days=min_gap_days,
+        )
+        if fallback_day is None:
+            return start_day, end_day, start_day, False, False, False
+        return start_day, end_day, fallback_day, False, False, used_relaxed
 
-    def _plan_remote_window(self, start_day, end_day, item, min_gap_days=0, allow_window_shift=True):
-        original_start, original_end = start_day, end_day
-        window_len = end_day - start_day + 1
-        max_shift = int(self.cfg.get("REMOTE_MAX_SHIFT_DAYS", 3))
-        min_allowed_start = max(1, original_start - max_shift)
-        max_allowed_start = min(max(1, self.days_in_month - window_len + 1), original_start + max_shift)
+    def _plan_remote_window(self, start_day, end_day, item, min_gap_days=0):
+        """偏远门店：在固定窗口内挑一个「偏远占用日」，优先与其他偏远单凑同一天。"""
         target_week = self._get_week_index(start_day)
-
-        candidate_starts = self._build_window_start_order(start_day, window_len, item) if allow_window_shift else [start_day]
-        for candidate_start in candidate_starts:
-            if candidate_start < min_allowed_start or candidate_start > max_allowed_start:
-                continue
-            candidate_end = candidate_start + window_len - 1
-            adjusted_start, adjusted_end, holiday_adjusted = self._adjust_range_for_holiday(candidate_start, candidate_end)
-            preferred_days = self._get_preferred_days_for_item(item, adjusted_start, adjusted_end, start_day)
-            preferred_day = preferred_days[0] if preferred_days else min(max(adjusted_start, candidate_start), adjusted_end)
-            candidate_days = self._build_window_day_order(adjusted_start, adjusted_end, preferred_day)
-            candidate_days = [d for d in candidate_days if not self._is_holiday(d)]
-            candidate_days, used_relaxed = self._filter_days_by_order_capacity(candidate_days, item)
-            candidate_days = [d for d in candidate_days if self._check_store_gap_constraint(item, d, min_gap_days)]
-            candidate_days = self._sort_remote_days_for_pairing(candidate_days, item, preferred_day, target_week=target_week)
-            remote_day = candidate_days[0] if candidate_days else None
-            if remote_day is not None:
-                moved = adjusted_start != original_start or adjusted_end != original_end
-                return adjusted_start, adjusted_end, remote_day, holiday_adjusted, moved, used_relaxed
-
         adjusted_start, adjusted_end, holiday_adjusted = self._adjust_range_for_holiday(start_day, end_day)
+        preferred_days = self._get_preferred_days_for_item(item, adjusted_start, adjusted_end, start_day)
+        preferred_day = preferred_days[0] if preferred_days else min(max(adjusted_start, start_day), adjusted_end)
+
+        candidates = self._build_window_day_order(adjusted_start, adjusted_end, preferred_day)
+        candidates = [d for d in candidates if not self._is_holiday(d)]
+        candidates, used_relaxed = self._filter_days_by_order_capacity(candidates, item)
+        candidates = [d for d in candidates if self._check_store_gap_constraint(item, d, min_gap_days)]
+        candidates = self._sort_remote_days_for_pairing(candidates, item, preferred_day, target_week=target_week)
+        if candidates:
+            moved = adjusted_start != start_day or adjusted_end != end_day
+            return adjusted_start, adjusted_end, candidates[0], holiday_adjusted, moved, used_relaxed
+
         fallback_candidates = [d for d in range(adjusted_start, adjusted_end + 1) if not self._is_holiday(d)]
         fallback_candidates, used_relaxed = self._filter_days_by_order_capacity(fallback_candidates, item)
         fallback_candidates = [d for d in fallback_candidates if self._check_store_gap_constraint(item, d, min_gap_days)]
@@ -1149,22 +1144,20 @@ class AutoSchedulerV2:
         freq = int(item['clean_freq'])
         last_date = item['last_date_obj']
 
-        def finalize_range(start_day, end_day, note, adjusted=False, allow_window_shift=True, preferred_service_day=None):
+        def finalize_range(start_day, end_day, note, adjusted=False, preferred_service_day=None):
             final_start, final_end = start_day, end_day
             final_note = self._append_remote_tag(note, item) + ("-假期避让" if adjusted else "")
             remote_day = None
             service_day = None
             min_gap_days = self._get_min_gap_days_for_frequency(freq, is_remote=is_remote)
             if is_remote:
-                final_start, final_end, remote_day, holiday_adjusted_remote, moved, used_relaxed = self._plan_remote_window(
-                    start_day, end_day, item, min_gap_days=min_gap_days, allow_window_shift=allow_window_shift
+                final_start, final_end, remote_day, holiday_adjusted_remote, moved, _used_relaxed = self._plan_remote_window(
+                    start_day, end_day, item, min_gap_days=min_gap_days
                 )
                 if holiday_adjusted_remote and "-假期避让" not in final_note:
                     final_note += "-假期避让"
                 if moved:
                     final_note += "-偏远顺移"
-                if used_relaxed:
-                    final_note += "-20日前放宽3单"
                 final_note += f"-偏远占用日{remote_day}号"
                 self._assign(final_start, final_end, item, final_note, remote_day=remote_day, load_mode="daily")
             else:
@@ -1174,7 +1167,6 @@ class AutoSchedulerV2:
                     item,
                     enforce_weekly_capacity=True,
                     min_gap_days=min_gap_days,
-                    allow_window_shift=allow_window_shift,
                     preferred_service_day=preferred_service_day,
                 )
                 if holiday_adjusted_align and "-假期避让" not in final_note:
@@ -1199,7 +1191,6 @@ class AutoSchedulerV2:
                 e_day,
                 f"{prefix}-第1次",
                 adjusted,
-                allow_window_shift=False,
                 preferred_service_day=preferred_service_day,
             )
 
@@ -1215,7 +1206,7 @@ class AutoSchedulerV2:
                 
                 note = f"{prefix}-第{idx}次"
                 if is_full_holiday: note += "[原定周全休-顺延]"
-                finalize_range(s_day, e_day, note, adjusted and not is_full_holiday, allow_window_shift=False)
+                finalize_range(s_day, e_day, note, adjusted and not is_full_holiday)
 
         elif freq == 3:
             periods = [
@@ -1240,7 +1231,7 @@ class AutoSchedulerV2:
                 s_day, e_day, adjusted = self._adjust_range_for_holiday(s_day, e_day)
                 
                 note = f"{prefix}-第{idx}次"
-                finalize_range(s_day, e_day, note, adjusted, allow_window_shift=False)
+                finalize_range(s_day, e_day, note, adjusted)
                 count -= 1
 
     def _find_next_fixed_day(self, start_day, item):
@@ -1341,11 +1332,8 @@ class AutoSchedulerV2:
                     note += note_suffix
                 if self._is_holiday(anchor_day):
                     note += "[警告:假期冲撞]"
-                if not self._check_person_order_constraint(anchor_day, item, allow_relaxed=False):
-                    if used_relaxed or self._check_person_order_constraint(anchor_day, item, allow_relaxed=True):
-                        note += "[20日前放宽3单]"
-                    else:
-                        note += "[警告:人员日工单超限]"
+                if not self._check_person_order_constraint(anchor_day, item):
+                    note += "[警告:人员日工单超限]"
                 self._assign(start_day, end_day, item, note, is_fixed=True, fixed_day=anchor_day)
 
         # 2. 配置品牌的单日锁定逻辑
@@ -1354,11 +1342,8 @@ class AutoSchedulerV2:
             anchor = self._get_brand_anchor_day(last_date)
             best = self._find_best_slot_soft(anchor, True, False, item=item)
             note = self._append_remote_tag("品牌单日", item)
-            if not self._check_person_order_constraint(best, item, allow_relaxed=False):
-                if self._check_person_order_constraint(best, item, allow_relaxed=True):
-                    note += "[20日前放宽3单]"
-                else:
-                    note += "[警告:人员日工单超限]"
+            if not self._check_person_order_constraint(best, item):
+                note += "[警告:人员日工单超限]"
             self._assign(best, best, item, note, is_fixed=True)
 
         # 3. 配置品牌的3天范围逻辑
@@ -1423,13 +1408,8 @@ class AutoSchedulerV2:
                     note += "[警告:假期冲撞]"
                 if holiday_over_threshold and holiday_days > max_holiday_days:
                     note += "[警告:假期天数超阈值]"
-                if used_relaxed:
-                    note += "[20日前放宽3单]"
-                if not self._check_person_order_constraint(service_day, item, allow_relaxed=False):
-                    if self._check_person_order_constraint(service_day, item, allow_relaxed=True):
-                        note += "[20日前放宽3单]"
-                    else:
-                        note += "[警告:人员日工单超限]"
+                if not self._check_person_order_constraint(service_day, item):
+                    note += "[警告:人员日工单超限]"
 
                 self._assign(start_day, end_day, item, note, is_fixed=True, fixed_day=service_day)
                 rolling_anchor = min(self.days_in_month, service_day + step_days)
@@ -1448,7 +1428,6 @@ class AutoSchedulerV2:
                 e_day,
                 item,
                 enforce_weekly_capacity=True,
-                allow_window_shift=False,
             )
             if aligned_adjusted and "-假期避让" not in note:
                 note += "-假期避让"

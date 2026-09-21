@@ -4,7 +4,8 @@ import pandas as pd
 from pandas.testing import assert_frame_equal
 
 from auto_scheduler.config_store import load_default_config
-from auto_scheduler.engine import run_schedule
+from auto_scheduler.engine import ProductionScheduler, run_schedule
+from auto_scheduler.legacy_core import DEFAULT_CONFIG
 
 
 def _input_rows(count: int = 5) -> pd.DataFrame:
@@ -37,7 +38,6 @@ def _strict_config() -> dict:
             "MONTH": 2,
             "HOLIDAY_BLOCKS": [],
             "MAX_DAILY_ORDERS_PER_PERSON": 1,
-            "MAX_DAILY_ORDERS_PER_PERSON_RELAXED": 1,
             "MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON": 2,
             "REGULAR_FREQ1_WINDOW_DAYS": 1,
         }
@@ -76,7 +76,6 @@ def test_supported_frequencies_are_accounted_for():
             "MONTH": 8,
             "HOLIDAY_BLOCKS": [],
             "MAX_DAILY_ORDERS_PER_PERSON": 20,
-            "MAX_DAILY_ORDERS_PER_PERSON_RELAXED": 20,
             "MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON": 100,
         }
     )
@@ -98,7 +97,6 @@ def test_fixed_holiday_date_is_scheduled_with_visible_warning():
             "MONTH": 8,
             "HOLIDAY_BLOCKS": [(5, 5)],
             "MAX_DAILY_ORDERS_PER_PERSON": 10,
-            "MAX_DAILY_ORDERS_PER_PERSON_RELAXED": 10,
             "MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON": 100,
         }
     )
@@ -121,7 +119,6 @@ def test_remote_and_brand_range_rules_are_preserved():
             "MONTH": 8,
             "HOLIDAY_BLOCKS": [],
             "MAX_DAILY_ORDERS_PER_PERSON": 10,
-            "MAX_DAILY_ORDERS_PER_PERSON_RELAXED": 10,
             "MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON": 100,
         }
     )
@@ -145,7 +142,6 @@ def test_future_month_in_same_year_is_treated_as_previous_year_for_quarterly_wor
             "MONTH": 8,
             "HOLIDAY_BLOCKS": [],
             "MAX_DAILY_ORDERS_PER_PERSON": 10,
-            "MAX_DAILY_ORDERS_PER_PERSON_RELAXED": 10,
             "MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON": 100,
         }
     )
@@ -154,3 +150,207 @@ def test_future_month_in_same_year_is_treated_as_previous_year_for_quarterly_wor
 
     assert result.summary["预期服务任务"] == 1
     assert result.summary["成功排班数"] == 1
+
+
+def test_work_is_spread_across_days():
+    """互不相邻的门店要把工单摊开，不先把单日额度占满、月底留空。"""
+    dataframe = _input_rows(8)
+    dataframe["上月服务日期"] = "2026-07-15"
+    # 让门店彼此相距约 1.5 公里，排除近邻同日的干扰，单独检验负载均衡
+    for index in range(8):
+        dataframe.loc[index, "纬度"] = 30.0 + index * 0.015
+        dataframe.loc[index, "经度"] = 120.0 + index * 0.015
+    config = load_default_config()
+    config.update(
+        {
+            "YEAR": 2026,
+            "MONTH": 8,
+            "HOLIDAY_BLOCKS": [],
+            "MAX_DAILY_ORDERS_PER_PERSON": 4,
+            "MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON": 25,
+            "MAX_MONTHLY_WORKDAYS_PER_PERSON": 25,
+        }
+    )
+
+    result = run_schedule(dataframe, config)
+
+    assert result.summary["成功排班数"] == 8
+    per_day = result.scheduled.groupby("服务锚点日期").size()
+    assert per_day.max() <= 4
+    assert len(per_day) >= 6, "8 单应摊开到至少 6 天，而不是先占满单日额度"
+
+
+def _apart_rows(count: int) -> pd.DataFrame:
+    """生成相互远离、排除近邻同日干扰的门店样本。"""
+    dataframe = _input_rows(count)
+    dataframe["上月服务日期"] = "2026-07-15"
+    for index in range(count):
+        dataframe.loc[index, "纬度"] = 20.0 + index * 0.02
+        dataframe.loc[index, "经度"] = 100.0 + index * 0.02
+    return dataframe
+
+
+def test_monthly_workday_limit_caps_workdays():
+    """每月工作日上限是硬约束：超出后不再新开工作日，改为转异常。"""
+    dataframe = _apart_rows(20)
+    config = load_default_config()
+    config.update(
+        {
+            "YEAR": 2026,
+            "MONTH": 8,
+            "HOLIDAY_BLOCKS": [],
+            "MAX_DAILY_ORDERS_PER_PERSON": 4,
+            "MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON": 100,
+            "MAX_MONTHLY_WORKDAYS_PER_PERSON": 3,
+        }
+    )
+
+    result = run_schedule(dataframe, config)
+
+    workdays = result.scheduled["服务锚点日期"].nunique()
+    assert workdays <= 3
+    assert result.summary["硬规则冲突数"] >= 1
+
+
+def test_dorm_stores_share_one_daily_slot():
+    """同一主门店下的多个宿舍，当天合计只占 1 个日额度，因此可超过每日 4 单上限。"""
+    dataframe = _input_rows(6)
+    dataframe["门店名称"] = [f"很久以前（测试商场店）-宿舍{i + 1}" for i in range(6)]
+    dataframe["品牌"] = "很久以前羊肉串"
+    dataframe["上月服务日期"] = "2026-07-15"
+    for index in range(6):
+        dataframe.loc[index, "纬度"] = 30.0
+        dataframe.loc[index, "经度"] = 120.0
+    config = load_default_config()
+    config.update(
+        {
+            "YEAR": 2026,
+            "MONTH": 8,
+            "HOLIDAY_BLOCKS": [],
+            "MAX_DAILY_ORDERS_PER_PERSON": 2,
+            "MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON": 25,
+            "MAX_MONTHLY_WORKDAYS_PER_PERSON": 25,
+        }
+    )
+
+    result = run_schedule(dataframe, config)
+
+    per_day = result.scheduled.groupby("服务锚点日期").size()
+    assert result.summary["成功排班数"] == 6
+    assert len(per_day) == 1, "同主门店的宿舍应并到同一天"
+    assert per_day.max() == 6, "宿舍组只占 1 个日额度，可突破每日 2 单上限"
+
+
+def test_dorm_stores_merge_even_when_beyond_nearby_radius():
+    """宿舍之间常相距 200~600 米，超出近邻半径，仍应并到同一天（靠同组信号）。"""
+    dataframe = _input_rows(3)
+    dataframe["门店名称"] = [f"很久以前（测试商场店）-宿舍{i + 1}" for i in range(3)]
+    dataframe["品牌"] = "很久以前羊肉串"
+    dataframe["上月服务日期"] = "2026-07-15"
+    # 三个宿舍相隔约 300 米，均超过 150 米近邻半径
+    for index in range(3):
+        dataframe.loc[index, "纬度"] = 30.0
+        dataframe.loc[index, "经度"] = 120.0 + index * 0.003
+    config = load_default_config()
+    config.update(
+        {
+            "YEAR": 2026,
+            "MONTH": 8,
+            "HOLIDAY_BLOCKS": [],
+            "MAX_DAILY_ORDERS_PER_PERSON": 1,
+            "MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON": 25,
+            "MAX_MONTHLY_WORKDAYS_PER_PERSON": 25,
+        }
+    )
+
+    result = run_schedule(dataframe, config)
+
+    assert result.summary["成功排班数"] == 3
+    assert result.scheduled["服务锚点日期"].nunique() == 1, "同主门店的宿舍应并到同一天"
+
+
+def test_frequency_three_windows_are_locked_to_three_periods():
+    """频次 3 的窗口固定为三旬区间，不因容量压力整体平移。"""
+    dataframe = _input_rows(1)
+    dataframe["本月需要服务次数"] = 3
+    config = load_default_config()
+    config.update({"YEAR": 2026, "MONTH": 8, "HOLIDAY_BLOCKS": []})
+
+    result = run_schedule(dataframe, config)
+
+    windows = sorted(
+        (start.day, end.day)
+        for start, end in zip(result.scheduled["开始日期"], result.scheduled["截止日期"])
+    )
+    assert windows == [(1, 10), (11, 20), (21, 31)]
+
+
+def test_frequency_three_windows_stay_fixed_under_capacity_pressure():
+    """容量紧张时，频次 3 的窗口仍保持三旬区间，排不下的部分转异常。"""
+    dataframe = _input_rows(4)
+    dataframe["本月需要服务次数"] = [3, 1, 1, 1]
+    dataframe["上月服务日期"] = "2026-07-15"
+    config = load_default_config()
+    config.update(
+        {
+            "YEAR": 2026,
+            "MONTH": 8,
+            "HOLIDAY_BLOCKS": [],
+            "MAX_DAILY_ORDERS_PER_PERSON": 1,
+            "MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON": 2,
+        }
+    )
+
+    result = run_schedule(dataframe, config)
+
+    freq3 = result.scheduled[result.scheduled["门店ID"] == "store-0"]
+    windows = sorted((start.day, end.day) for start, end in zip(freq3["开始日期"], freq3["截止日期"]))
+    assert all(window in [(1, 10), (11, 20), (21, 31)] for window in windows)
+    assert result.summary["成功排班数"] + result.summary["硬规则冲突数"] >= 4
+
+
+def _balance_scheduler() -> ProductionScheduler:
+    config = dict(DEFAULT_CONFIG)
+    config.update(load_default_config())
+    config.update({"YEAR": 2026, "MONTH": 8, "HOLIDAY_BLOCKS": []})
+    return ProductionScheduler(config)
+
+
+def test_same_mall_alignment_outranks_daily_load():
+    """近邻第 1 位：同商场同日优先于当天负载（单日上限由容量硬校验单独把关）。"""
+    scheduler = _balance_scheduler()
+    item = {"服务人员": "专家甲", "门店ID": "本店", "纬度": 30.0, "经度": 120.0}
+    # 同商场门店已排在 11 号（距离 0 米，属于近邻）
+    scheduler.assignment_points_by_person["专家甲"].append(
+        {"store_id": "同商场店", "service_person": "专家甲", "lat": 30.0, "lng": 120.0, "service_day": 11}
+    )
+    # 11 号当天已排 3 单（未满），20 号当天为空
+    scheduler.person_day_order_stats[11]["专家甲"] = 3
+
+    assert scheduler._balance_key(11, item, 11) < scheduler._balance_key(20, item, 11)
+
+
+def test_same_mall_alignment_never_exceeds_daily_cap():
+    """即使全部是同商场近邻门店，单日工单数也不会突破日上限。"""
+    dataframe = _input_rows(6)
+    dataframe["上月服务日期"] = "2026-07-15"
+    for index in range(6):  # 6 家门店坐标完全一致 = 互为同商场近邻
+        dataframe.loc[index, "纬度"] = 30.0
+        dataframe.loc[index, "经度"] = 120.0
+    config = load_default_config()
+    config.update(
+        {
+            "YEAR": 2026,
+            "MONTH": 8,
+            "HOLIDAY_BLOCKS": [],
+            "MAX_DAILY_ORDERS_PER_PERSON": 2,
+            "MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON": 25,
+        }
+    )
+
+    result = run_schedule(dataframe, config)
+
+    per_day = result.scheduled.groupby("服务锚点日期").size()
+    assert result.summary["成功排班数"] == 6
+    assert per_day.max() <= 2
+    assert result.summary["硬规则冲突数"] == 0

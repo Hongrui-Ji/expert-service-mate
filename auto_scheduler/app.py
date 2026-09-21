@@ -49,11 +49,9 @@ st.markdown(
 
 
 NUMERIC_FIELDS = (
-    ("SOFT_ANCHOR_TOLERANCE", "锚点容忍天数", 0, 31),
-    ("MAX_DAILY_ORDERS_PER_PERSON", "每日严格上限", 1, 20),
-    ("MAX_DAILY_ORDERS_PER_PERSON_RELAXED", "每日放宽上限", 1, 20),
-    ("RELAXED_CAP_BEFORE_DAY", "放宽截止日", 1, 31),
-    ("MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON", "每周容量上限", 1, 100),
+    ("MAX_DAILY_ORDERS_PER_PERSON", "每日工单上限", 1, 20),
+    ("MAX_MONTHLY_WORKDAYS_PER_PERSON", "每月工作日上限", 1, 31),
+    ("MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON", "每周工单上限", 1, 100),
     ("NEARBY_ALIGN_RADIUS_METERS", "近邻半径（米）", 0, 100000),
     ("REMOTE_DAILY_PAIR_TARGET", "偏远门店同日聚合目标", 1, 20),
     ("REMOTE_MIN_GAP_DAYS_FREQ2", "偏远频次2最小间隔", 0, 31),
@@ -61,7 +59,6 @@ NUMERIC_FIELDS = (
     ("REGULAR_MIN_GAP_DAYS_FREQ2", "常规频次2最小间隔", 0, 31),
     ("REGULAR_MIN_GAP_DAYS_FREQ3", "常规频次3最小间隔", 0, 31),
     ("REGULAR_MIN_GAP_DAYS_FREQ4PLUS", "常规频次4+最小间隔", 0, 31),
-    ("REMOTE_MAX_SHIFT_DAYS", "偏远窗口最大顺移天数", 0, 31),
     ("BRAND_RANGE_MAX_HOLIDAY_DAYS", "三日范围最大假期天数", 0, 3),
     ("REGULAR_FREQ1_WINDOW_DAYS", "单次服务窗口天数", 1, 31),
     ("QUARTERLY_INTERVAL_MONTHS", "季度门店最小间隔（月）", 1, 24),
@@ -70,7 +67,7 @@ NUMERIC_FIELDS = (
     ("SMOOTHING_NEIGHBOR_LOAD_WEIGHT", "平滑：相邻日负载权重", 0, 1000),
     ("SMOOTHING_NEARBY_ALIGN_BONUS", "平滑：近邻同日奖励", 0, 1000),
 )
-WIDGET_KEYS = ["remote_editor", "date_brand_editor", "range_brand_editor"] + [
+WIDGET_KEYS = ["remote_editor", "date_brand_editor", "range_brand_editor", "dorm_editor"] + [
     f"config_{field[0]}" for field in NUMERIC_FIELDS
 ]
 
@@ -118,7 +115,7 @@ def _render_config_editor(base_config: dict) -> dict:
     with top_right:
         st.info("此处修改的是所有使用者共享的一套规则。")
 
-    list_col1, list_col2, list_col3 = st.columns(3)
+    list_col1, list_col2, list_col3, list_col4 = st.columns(4)
     with list_col1:
         remote_cities = _list_editor(
             "偏远城市/区域",
@@ -139,6 +136,13 @@ def _render_config_editor(base_config: dict) -> dict:
             base_config["SPECIFIC_RANGE_BRANDS"],
             "range_brand_editor",
             "这些品牌使用三日服务窗口规则。",
+        )
+    with list_col4:
+        dorm_keywords = _list_editor(
+            "宿舍关键词",
+            base_config["DORM_KEYWORDS"],
+            "dorm_editor",
+            "门店名称含关键词即视为宿舍；同一主门店的宿舍合并成 1 次出勤。",
         )
 
     st.divider()
@@ -163,6 +167,7 @@ def _render_config_editor(base_config: dict) -> dict:
     current["REMOTE_CITIES"] = remote_cities
     current["SPECIFIC_DATE_BRANDS"] = date_brands
     current["SPECIFIC_RANGE_BRANDS"] = range_brands
+    current["DORM_KEYWORDS"] = dorm_keywords
 
     if st.button("保存共享配置", type="primary", width="stretch"):
         try:
