@@ -23,7 +23,13 @@ LEGACY_DEFAULT_MIGRATION: dict[str, dict[int, int]] = {
     "NEARBY_ALIGN_RADIUS_METERS": {300: 150},
 }
 
-LIST_KEYS = ("REMOTE_CITIES", "SPECIFIC_DATE_BRANDS", "SPECIFIC_RANGE_BRANDS", "DORM_KEYWORDS")
+LIST_KEYS = (
+    "REMOTE_CITIES",
+    "SPECIFIC_DATE_BRANDS",
+    "SPECIFIC_RANGE_BRANDS",
+    "DORM_KEYWORDS",
+    "BRAND_RANGE_END_ANCHOR_BRANDS",
+)
 INTEGER_KEYS = (
     "MAX_DAILY_ORDERS_PER_PERSON",
     "MAX_MONTHLY_WORKDAYS_PER_PERSON",
@@ -40,7 +46,10 @@ INTEGER_KEYS = (
     "REGULAR_MIN_GAP_DAYS_FREQ3",
     "REGULAR_MIN_GAP_DAYS_FREQ4PLUS",
     "BRAND_RANGE_MAX_HOLIDAY_DAYS",
+    "BRAND_RANGE_END_OFFSET_DAYS",
+    "BRAND_RANGE_MIN_INTERVAL_DAYS",
     "REGULAR_FREQ1_WINDOW_DAYS",
+    "REGULAR_FREQ1_ANCHOR_DAYS",
     "QUARTERLY_INTERVAL_MONTHS",
 )
 
@@ -116,12 +125,23 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("每周工单上限必须至少为 1")
     if normalized["REGULAR_FREQ1_WINDOW_DAYS"] < 1 or normalized["REGULAR_FREQ1_WINDOW_DAYS"] > 31:
         raise ConfigError("单次服务窗口必须在 1 到 31 天之间")
+    if not 0 <= normalized["REGULAR_FREQ1_ANCHOR_DAYS"] <= 62:
+        raise ConfigError("单次服务锚点天数必须在 0 到 62 天之间（0 表示沿用旧版「上月同日」）")
     if normalized["QUARTERLY_INTERVAL_MONTHS"] < 1:
         raise ConfigError("季度间隔必须至少为 1 个月")
+    if not 1 <= normalized["BRAND_RANGE_END_OFFSET_DAYS"] <= 31:
+        raise ConfigError("三日范围窗口截止锚定天数必须在 1 到 31 天之间")
+    if not 0 <= normalized["BRAND_RANGE_MIN_INTERVAL_DAYS"] <= 31:
+        raise ConfigError("三日范围最小间隔天数必须在 0 到 31 天之间")
+    if normalized["BRAND_RANGE_MIN_INTERVAL_DAYS"] >= normalized["BRAND_RANGE_END_OFFSET_DAYS"]:
+        raise ConfigError("三日范围最小间隔天数必须小于窗口截止锚定天数")
 
     overlap = set(normalized["SPECIFIC_DATE_BRANDS"]) & set(normalized["SPECIFIC_RANGE_BRANDS"])
     if overlap:
         raise ConfigError(f"品牌不能同时属于单日和三日范围规则：{', '.join(sorted(overlap))}")
+    not_range_brand = set(normalized["BRAND_RANGE_END_ANCHOR_BRANDS"]) - set(normalized["SPECIFIC_RANGE_BRANDS"])
+    if not_range_brand:
+        raise ConfigError(f"窗口截止锚定品牌必须同时属于三日范围品牌：{', '.join(sorted(not_range_brand))}")
     return normalized
 
 

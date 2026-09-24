@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
@@ -127,6 +127,9 @@ class ProductionScheduler(AutoSchedulerV2):
             service_day = None
         return aligned_start, aligned_end, service_day, adjusted, moved, used_relaxed
 
+    def _record_unplaceable(self, item, rule_note, reason, start_day=None, end_day=None):
+        self._record_conflict(start_day, end_day, item, rule_note, reason)
+
     def _record_conflict(self, start_day, end_day, item, rule_note, reason):
         def as_date(day):
             if day is None:
@@ -181,6 +184,30 @@ class ProductionScheduler(AutoSchedulerV2):
                 "可选日期内的人员日容量或周容量已达到上限",
             )
             return False
+
+        interval_limits = self._brand_interval_limits(item)
+        if (
+            interval_limits is not None
+            and item.get("last_date_obj")
+            and self._is_previous_month_service(item)
+            and "-假期避让" not in str(rule_note)
+        ):
+            min_days, max_days = interval_limits
+            last_service_date = item["last_date_obj"]
+            if isinstance(last_service_date, datetime):
+                last_service_date = last_service_date.date()
+            actual_days = (
+                date(self.cfg["YEAR"], self.cfg["MONTH"], service_day) - last_service_date
+            ).days
+            if actual_days < min_days or actual_days > max_days:
+                self._record_conflict(
+                    start_day,
+                    end_day,
+                    item,
+                    rule_note,
+                    f"实际上门日距上月服务日 {actual_days} 天，超出 {min_days}~{max_days} 天要求",
+                )
+                return False
 
         occurrences = max(1, round(item.get("clean_freq", 1)))
         minimum_gap = self._get_min_gap_days_for_frequency(

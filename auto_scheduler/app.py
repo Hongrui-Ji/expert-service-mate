@@ -60,16 +60,23 @@ NUMERIC_FIELDS = (
     ("REGULAR_MIN_GAP_DAYS_FREQ3", "常规频次3最小间隔", 0, 31),
     ("REGULAR_MIN_GAP_DAYS_FREQ4PLUS", "常规频次4+最小间隔", 0, 31),
     ("BRAND_RANGE_MAX_HOLIDAY_DAYS", "三日范围最大假期天数", 0, 3),
+    ("BRAND_RANGE_END_OFFSET_DAYS", "窗口截止=上月服务日+N天", 1, 31),
+    ("BRAND_RANGE_MIN_INTERVAL_DAYS", "三日范围最小间隔（天）", 0, 31),
     ("REGULAR_FREQ1_WINDOW_DAYS", "单次服务窗口天数", 1, 31),
+    ("REGULAR_FREQ1_ANCHOR_DAYS", "单次服务锚点距上月天数", 0, 62),
     ("QUARTERLY_INTERVAL_MONTHS", "季度门店最小间隔（月）", 1, 24),
     ("SMOOTHING_ANCHOR_WEIGHT", "平滑：锚点偏离权重", 0, 1000),
     ("SMOOTHING_DAY_LOAD_WEIGHT", "平滑：当日负载权重", 0, 1000),
     ("SMOOTHING_NEIGHBOR_LOAD_WEIGHT", "平滑：相邻日负载权重", 0, 1000),
     ("SMOOTHING_NEARBY_ALIGN_BONUS", "平滑：近邻同日奖励", 0, 1000),
 )
-WIDGET_KEYS = ["remote_editor", "date_brand_editor", "range_brand_editor", "dorm_editor"] + [
-    f"config_{field[0]}" for field in NUMERIC_FIELDS
-]
+WIDGET_KEYS = [
+    "remote_editor",
+    "date_brand_editor",
+    "range_brand_editor",
+    "dorm_editor",
+    "end_anchor_brand_editor",
+] + [f"config_{field[0]}" for field in NUMERIC_FIELDS]
 
 
 def _load_rules() -> dict:
@@ -145,6 +152,20 @@ def _render_config_editor(base_config: dict) -> dict:
             "门店名称含关键词即视为宿舍；同一主门店的宿舍合并成 1 次出勤。",
         )
 
+    anchor_col1, anchor_col2, _anchor_col3, _anchor_col4 = st.columns(4)
+    with anchor_col1:
+        end_anchor_brands = _list_editor(
+            "窗口截止锚定品牌",
+            base_config["BRAND_RANGE_END_ANCHOR_BRANDS"],
+            "end_anchor_brand_editor",
+            "这些三日范围品牌的窗口最后一天 = 上月服务日 + N 天，窗口内 3 天即为可上门日。",
+        )
+    with anchor_col2:
+        st.caption(
+            "例：上月 9/13 上门、N=30 → 窗口 10/11~10/13，"
+            "实际上门日落在距上月 28~30 天；整段撞假期时才整体避让并标注「假期避让」。"
+        )
+
     st.divider()
     st.markdown("#### 容量、间隔与平滑参数")
     numeric_values: dict[str, int] = {}
@@ -168,6 +189,7 @@ def _render_config_editor(base_config: dict) -> dict:
     current["SPECIFIC_DATE_BRANDS"] = date_brands
     current["SPECIFIC_RANGE_BRANDS"] = range_brands
     current["DORM_KEYWORDS"] = dorm_keywords
+    current["BRAND_RANGE_END_ANCHOR_BRANDS"] = end_anchor_brands
 
     if st.button("保存共享配置", type="primary", width="stretch"):
         try:
