@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
 import pandas as pd
@@ -163,6 +163,13 @@ class ProductionScheduler(AutoSchedulerV2):
         remote_day=None,
         load_mode="daily",
     ):
+        interval_days = self._brand_interval_days(item)
+        if interval_days is not None and (
+            end_day - start_day != 2 or start_day not in interval_days or end_day not in interval_days
+        ):
+            self._record_brand_window_conflict(item, rule_note)
+            return False
+
         service_day = remote_day if remote_day is not None else (fixed_day if is_fixed else None)
         if service_day is None:
             preferred = self._get_preferred_days_for_item(item, start_day, end_day, start_day)
@@ -184,30 +191,6 @@ class ProductionScheduler(AutoSchedulerV2):
                 "可选日期内的人员日容量或周容量已达到上限",
             )
             return False
-
-        interval_limits = self._brand_interval_limits(item)
-        if (
-            interval_limits is not None
-            and item.get("last_date_obj")
-            and self._is_previous_month_service(item)
-            and "-假期避让" not in str(rule_note)
-        ):
-            min_days, max_days = interval_limits
-            last_service_date = item["last_date_obj"]
-            if isinstance(last_service_date, datetime):
-                last_service_date = last_service_date.date()
-            actual_days = (
-                date(self.cfg["YEAR"], self.cfg["MONTH"], service_day) - last_service_date
-            ).days
-            if actual_days < min_days or actual_days > max_days:
-                self._record_conflict(
-                    start_day,
-                    end_day,
-                    item,
-                    rule_note,
-                    f"实际上门日距上月服务日 {actual_days} 天，超出 {min_days}~{max_days} 天要求",
-                )
-                return False
 
         occurrences = max(1, round(item.get("clean_freq", 1)))
         minimum_gap = self._get_min_gap_days_for_frequency(

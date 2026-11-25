@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 
 import pandas as pd
+import pytest
 
 from auto_scheduler.config_store import load_default_config
 from auto_scheduler.engine import run_schedule
@@ -50,63 +51,114 @@ def _config(**overrides):
     return config
 
 
-def test_tashi_window_ends_thirty_days_after_last_service():
-    result = run_schedule(_tashi_rows(1), _config())
+def _assert_legal_window(row, last_date: str, month: int):
+    previous = _as_date(last_date)
+    start = _as_date(row["开始日期"])
+    end = _as_date(row["截止日期"])
+    service = _as_date(row["服务锚点日期"])
+    assert start.month == end.month == month
+    assert (end - start).days == 2
+    assert 25 <= (start - previous).days <= (end - previous).days <= 35
+    assert start <= service <= end
+
+
+@pytest.mark.parametrize(
+    ("last_date", "year", "month"),
+    [
+        ("2026-09-13", 2026, 10),
+        ("2026-07-01", 2026, 8),
+        ("2026-01-31", 2026, 2),
+        ("2026-12-01", 2027, 1),
+    ],
+)
+def test_tashi_full_window_stays_inside_the_interval_and_target_month(last_date, year, month):
+    result = run_schedule(_tashi_rows(1, last_date), _config(YEAR=year, MONTH=month))
 
     row = result.scheduled.iloc[0]
-    assert _as_date(row["开始日期"]) == date(2026, 10, 11)
-    assert _as_date(row["截止日期"]) == date(2026, 10, 13)
-    interval = (_as_date(row["服务锚点日期"]) - date(2026, 9, 13)).days
-    assert 28 <= interval <= 30
+    _assert_legal_window(row, last_date, month)
     assert "3天范围门店" in row["排班逻辑"]
     assert result.summary["硬规则冲突数"] == 0
 
 
-def test_tashi_window_shifts_only_when_whole_window_hits_holiday():
-    result = run_schedule(
-        _tashi_rows(1, last_date="2026-09-02"),
-        _config(HOLIDAY_BLOCKS=[(1, 3)]),
-    )
+def test_tashi_moves_around_holidays_within_interval():
+    last_date = "2026-09-13"
+    result = run_schedule(_tashi_rows(1, last_date), _config(HOLIDAY_BLOCKS=[(8, 15)]))
 
     row = result.scheduled.iloc[0]
-    service_day = _as_date(row["服务锚点日期"])
-    assert "假期避让" in row["排班逻辑"]
-    assert _as_date(row["开始日期"]) <= service_day <= _as_date(row["截止日期"])
-    assert service_day > date(2026, 10, 3)
-    assert (service_day - date(2026, 9, 2)).days > 30
+    _assert_legal_window(row, last_date, 10)
+    assert _as_date(row["服务锚点日期"]).day >= 16
 
 
-def test_tashi_window_that_cannot_fit_capacity_goes_to_conflicts():
-    result = run_schedule(_tashi_rows(4), _config(MAX_DAILY_ORDERS_PER_PERSON=1))
+def test_tashi_full_interval_blocked_by_holidays_goes_to_conflicts():
+    result = run_schedule(_tashi_rows(1), _config(HOLIDAY_BLOCKS=[(8, 18)]))
 
-    assert result.summary["成功排班数"] == 3
+    assert result.scheduled.empty
     assert result.summary["硬规则冲突数"] == 1
+    assert "连续三日窗口" in result.anomalies.iloc[0]["异常原因"]
+
+
+def test_tashi_uses_full_interval_without_exceeding_daily_capacity():
+    last_date = "2026-09-13"
+    result = run_schedule(_tashi_rows(12, last_date), _config(MAX_DAILY_ORDERS_PER_PERSON=1))
+
+    assert result.summary["成功排班数"] == 11
+    assert result.summary["硬规则冲突数"] == 1
+    assert result.scheduled["服务锚点日期"].is_unique
+    for _, row in result.scheduled.iterrows():
+        _assert_legal_window(row, last_date, 10)
     assert "容量" in result.anomalies.iloc[0]["异常原因"]
 
 
-def test_month_start_last_service_keeps_window_inside_the_band():
-    """上月 2 号上门时，窗口收口到本月 1 号，仍落在 25~30 天硬区间内。"""
-    result = run_schedule(
-        _tashi_rows(1, last_date="2026-07-02"),
-        _config(MONTH=8),
-    )
+@pytest.mark.parametrize(
+    ("requirement", "expected_day"),
+    [
+        ("16到19号", 16),
+        ("18号", 18),
+        ("周四", 8),
+        ("周四或周五", 15),
+    ],
+)
+def test_tashi_special_requirements_keep_a_legal_three_day_window(requirement, expected_day):
+    last_date = "2026-09-13"
+    dataframe = _tashi_rows(1, last_date)
+    dataframe.loc[0, "指定日期"] = requirement
 
-    row = result.scheduled.iloc[0]
-    assert _as_date(row["开始日期"]) == date(2026, 8, 1)
-    assert _as_date(row["截止日期"]) == date(2026, 8, 1)
-    assert (_as_date(row["服务锚点日期"]) - date(2026, 7, 2)).days == 30
+    row = run_schedule(dataframe, _config()).scheduled.iloc[0]
+    _assert_legal_window(row, last_date, 10)
+    assert _as_date(row["服务锚点日期"]).day == expected_day
+    if requirement == "16到19号":
+        assert _as_date(row["开始日期"]).day == 16
+        assert _as_date(row["截止日期"]).day == 18
 
 
-def test_last_service_too_early_goes_to_conflicts():
-    """上月 1 号上门：本月不存在 25~30 天内的日期，转异常待处理。"""
-    result = run_schedule(
-        _tashi_rows(1, last_date="2026-07-01"),
-        _config(MONTH=8),
-    )
+@pytest.mark.parametrize("requirement", ["19号", "17到20号"])
+def test_tashi_conflicting_special_requirement_goes_to_conflicts(requirement):
+    dataframe = _tashi_rows(1)
+    dataframe.loc[0, "指定日期"] = requirement
 
-    assert result.summary["成功排班数"] == 0
+    result = run_schedule(dataframe, _config())
+    assert result.scheduled.empty
     assert result.summary["硬规则冲突数"] == 1
-    assert "没有距上月服务日" in result.anomalies.iloc[0]["异常原因"]
+    assert "连续三日窗口" in result.anomalies.iloc[0]["异常原因"]
+
+
+def test_tashi_multiple_visits_never_export_an_out_of_band_window():
+    last_date = "2026-09-13"
+    dataframe = _tashi_rows(1, last_date)
+    dataframe.loc[0, "本月需要服务次数"] = 2
+
+    result = run_schedule(dataframe, _config())
+    assert result.summary["成功排班数"] == result.summary["硬规则冲突数"] == 1
+    _assert_legal_window(result.scheduled.iloc[0], last_date, 10)
+
+
+def test_tashi_without_previous_month_history_keeps_the_regular_brand_rule():
+    result = run_schedule(_tashi_rows(1, ""), _config())
+
+    assert result.summary["成功排班数"] == 1
+    row = result.scheduled.iloc[0]
+    assert _as_date(row["开始日期"]) == date(2026, 10, 1)
+    assert _as_date(row["截止日期"]) == date(2026, 10, 3)
 
 
 def test_other_range_brands_keep_the_same_day_of_month_window():

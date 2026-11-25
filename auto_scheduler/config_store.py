@@ -46,7 +46,7 @@ INTEGER_KEYS = (
     "REGULAR_MIN_GAP_DAYS_FREQ3",
     "REGULAR_MIN_GAP_DAYS_FREQ4PLUS",
     "BRAND_RANGE_MAX_HOLIDAY_DAYS",
-    "BRAND_RANGE_END_OFFSET_DAYS",
+    "BRAND_RANGE_MAX_INTERVAL_DAYS",
     "BRAND_RANGE_MIN_INTERVAL_DAYS",
     "REGULAR_FREQ1_WINDOW_DAYS",
     "REGULAR_FREQ1_ANCHOR_DAYS",
@@ -129,19 +129,19 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ConfigError("单次服务锚点天数必须在 0 到 62 天之间（0 表示沿用旧版「上月同日」）")
     if normalized["QUARTERLY_INTERVAL_MONTHS"] < 1:
         raise ConfigError("季度间隔必须至少为 1 个月")
-    if not 1 <= normalized["BRAND_RANGE_END_OFFSET_DAYS"] <= 31:
-        raise ConfigError("三日范围窗口截止锚定天数必须在 1 到 31 天之间")
-    if not 0 <= normalized["BRAND_RANGE_MIN_INTERVAL_DAYS"] <= 31:
-        raise ConfigError("三日范围最小间隔天数必须在 0 到 31 天之间")
-    if normalized["BRAND_RANGE_MIN_INTERVAL_DAYS"] >= normalized["BRAND_RANGE_END_OFFSET_DAYS"]:
-        raise ConfigError("三日范围最小间隔天数必须小于窗口截止锚定天数")
+    if not 2 <= normalized["BRAND_RANGE_MAX_INTERVAL_DAYS"] <= 35:
+        raise ConfigError("三日范围最大间隔天数必须在 2 到 35 天之间")
+    if not 0 <= normalized["BRAND_RANGE_MIN_INTERVAL_DAYS"] <= 33:
+        raise ConfigError("三日范围最小间隔天数必须在 0 到 33 天之间")
+    if normalized["BRAND_RANGE_MAX_INTERVAL_DAYS"] - normalized["BRAND_RANGE_MIN_INTERVAL_DAYS"] < 2:
+        raise ConfigError("三日范围的最小与最大间隔至少要相差 2 天")
 
     overlap = set(normalized["SPECIFIC_DATE_BRANDS"]) & set(normalized["SPECIFIC_RANGE_BRANDS"])
     if overlap:
         raise ConfigError(f"品牌不能同时属于单日和三日范围规则：{', '.join(sorted(overlap))}")
     not_range_brand = set(normalized["BRAND_RANGE_END_ANCHOR_BRANDS"]) - set(normalized["SPECIFIC_RANGE_BRANDS"])
     if not_range_brand:
-        raise ConfigError(f"窗口截止锚定品牌必须同时属于三日范围品牌：{', '.join(sorted(not_range_brand))}")
+        raise ConfigError(f"有跨月间隔限制的品牌必须同时属于三日范围品牌：{', '.join(sorted(not_range_brand))}")
     return normalized
 
 
@@ -155,7 +155,7 @@ def load_config(path: Path | None = None) -> dict[str, Any]:
         raise ConfigError(f"共享配置读取失败：{exc}") from exc
     if not isinstance(data, dict):
         raise ConfigError("共享配置必须是 JSON 对象")
-    # 兼容历史配置：丢弃已下线的配置项（例如旧版的“日放宽上限”），
+    # 兼容历史配置：丢弃已下线的配置项（包括旧的窗口截止锚定天数），
     # 避免升级后被 validate_config 判为非法配置而整份回退默认值。
     known_keys = set(load_default_config())
     filtered = {key: value for key, value in data.items() if key in known_keys}

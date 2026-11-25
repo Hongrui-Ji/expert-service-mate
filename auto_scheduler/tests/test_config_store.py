@@ -83,6 +83,22 @@ def test_customised_capacity_values_are_kept(tmp_path):
     assert loaded["MAX_WEEKLY_ORDERS_NORMAL_QUARTERLY_PER_PERSON"] == 12
 
 
+def test_legacy_fixed_window_end_uses_the_new_interval_limit(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"BRAND_RANGE_END_OFFSET_DAYS": 30}), encoding="utf-8")
+
+    assert load_config(path=path)["BRAND_RANGE_MAX_INTERVAL_DAYS"] == 35
+
+
+def test_three_day_interval_has_room_for_a_complete_window(tmp_path):
+    config = load_default_config()
+    config["BRAND_RANGE_MIN_INTERVAL_DAYS"] = 33
+    config["BRAND_RANGE_MAX_INTERVAL_DAYS"] = 34
+
+    with pytest.raises(ConfigError, match="至少要相差 2 天"):
+        save_config(config, path=tmp_path / "config.json")
+
+
 def test_brand_rule_lists_must_not_overlap(tmp_path):
     config = load_default_config()
     config["SPECIFIC_DATE_BRANDS"] = ["重复品牌"]

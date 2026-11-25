@@ -34,7 +34,7 @@ DEFAULT_CONFIG = {
     
     # [品牌配置]
     "SPECIFIC_DATE_BRANDS": ['嘻游记'], # 指定锁定单日的品牌配置，可自由添加多个
-    "SPECIFIC_RANGE_BRANDS": ['塔斯汀中国汉堡',"半天妖烤鱼","GridCoffee","鱼酷活力烤鱼"], # [新增] 指定3天范围的品牌配置（截止锚定上次+30天）
+    "SPECIFIC_RANGE_BRANDS": ['塔斯汀中国汉堡',"半天妖烤鱼","GridCoffee","鱼酷活力烤鱼"], # 指定3天范围的品牌
     # [宿舍配置] 门店名称包含这些关键词即视为宿舍；同一主门店下的宿舍合并成一次出勤
     "DORM_KEYWORDS": ['宿舍'],
 
@@ -57,8 +57,8 @@ DEFAULT_CONFIG = {
     # [窗口截止锚定] 这些三日范围品牌改为「窗口最后一天 = 上月服务日 + N 天」，
     # 3 天窗口自然落在「上月服务日 + (N-2) ~ N 天」区间内
     "BRAND_RANGE_END_ANCHOR_BRANDS": ['塔斯汀中国汉堡'],
-    "BRAND_RANGE_END_OFFSET_DAYS": 30,   # 窗口截止日 = 上月服务日 + 30 天
-    "BRAND_RANGE_MIN_INTERVAL_DAYS": 25, # 实际上门日距上月服务日的硬下限
+    "BRAND_RANGE_MAX_INTERVAL_DAYS": 35, # 窗口截止日距上月服务日的硬上限
+    "BRAND_RANGE_MIN_INTERVAL_DAYS": 25, # 窗口开始日距上月服务日的硬下限
 
     # [服务窗口长度] 含首尾自然日天数（如 16 表示从 start 到 start+15 共 16 天）
     "REGULAR_FREQ1_WINDOW_DAYS": 15,   # 每月1次常规/偏远：服务窗口天数
@@ -379,7 +379,7 @@ class AutoSchedulerV2:
         return {str(brand).strip() for brand in self.cfg.get("BRAND_RANGE_END_ANCHOR_BRANDS", [])}
 
     def _is_end_anchored_brand(self, item):
-        """是否属于「窗口截止日锚定上次服务日」的三日范围品牌。"""
+        """是否属于有跨月间隔限制的三日范围品牌。"""
         brand = str(item.get('品牌', '')).strip()
         return bool(brand) and brand in self._end_anchor_brands()
 
@@ -392,33 +392,6 @@ class AutoSchedulerV2:
         last_index = last_date.year * 12 + last_date.month
         return last_index == month_index - 1
 
-    def _build_end_anchored_brand_window(self, last_date):
-        """窗口最后一天 = 上月服务日期 + N 天，返回 (开始日, 截止日, 锚点日)。
-
-        窗口取「上月服务日 + 最小间隔 ~ 上月服务日 + N 天」与本月相交的最后
-        3 天，因此窗口内每一天都落在间隔硬区间内；窗口跨到本月之外时按本月
-        首/末日收口。本月完全没有可用日期时返回 None（该门店转异常待处理）。
-        """
-        if not last_date:
-            return None
-        if isinstance(last_date, datetime):
-            last_date = last_date.date()
-        offset_days = int(self.cfg.get("BRAND_RANGE_END_OFFSET_DAYS", 30))
-        min_days = max(0, int(self.cfg.get("BRAND_RANGE_MIN_INTERVAL_DAYS", 25)))
-        if min_days >= offset_days:
-            min_days = max(0, offset_days - 1)
-        month_start = date(self.cfg["YEAR"], self.cfg["MONTH"], 1)
-        month_end = date(self.cfg["YEAR"], self.cfg["MONTH"], self.days_in_month)
-        band_start = max(month_start, last_date + timedelta(days=min_days))
-        band_end = min(month_end, last_date + timedelta(days=max(1, offset_days)))
-        if band_start > band_end:
-            return None
-
-        end_day = band_end.day
-        start_day = max(band_start.day, end_day - 2)
-        anchor_day = start_day + (end_day - start_day) // 2
-        return start_day, end_day, anchor_day
-
     def _record_unplaceable(self, item, rule_note, reason, start_day=None, end_day=None):
         """无可行日期时的兜底钩子；生产适配层会把它记入「异常待处理」。"""
 
@@ -426,22 +399,74 @@ class AutoSchedulerV2:
         """窗口截止锚定品牌的硬性间隔区间（天）；不适用时返回 None。"""
         if not self._is_end_anchored_brand(item):
             return None
-        offset_days = int(self.cfg.get("BRAND_RANGE_END_OFFSET_DAYS", 30))
-        min_days = int(self.cfg.get("BRAND_RANGE_MIN_INTERVAL_DAYS", 25))
-        return min_days, offset_days
+        return (
+            int(self.cfg["BRAND_RANGE_MIN_INTERVAL_DAYS"]),
+            int(self.cfg["BRAND_RANGE_MAX_INTERVAL_DAYS"]),
+        )
 
-    def _pick_day_in_brand_window(self, start_day, end_day, anchor_day, item, min_gap_days=0):
-        """在既定三日窗口内挑服务日；窗口容量/间隔都排不下时返回 None。"""
-        day_order = sorted(range(start_day, end_day + 1), key=lambda d: (abs(d - anchor_day), d))
-        day_order = [d for d in day_order if not self._is_holiday(d)]
-        if min_gap_days > 0:
-            day_order = [d for d in day_order if self._check_store_gap_constraint(item, d, min_gap_days)]
-        if not day_order:
+    def _brand_interval_days(self, item):
+        """返回本月符合间隔要求的日期；没有上月服务记录时沿用通用排班。"""
+        limits = self._brand_interval_limits(item)
+        if limits is None or not self._is_previous_month_service(item):
             return None
-        allowed_days, _used_relaxed = self._filter_days_by_order_capacity(day_order, item)
+        last_date = item["last_date_obj"]
+        if isinstance(last_date, datetime):
+            last_date = last_date.date()
+        month_start = date(self.cfg["YEAR"], self.cfg["MONTH"], 1)
+        first_day_interval = (month_start - last_date).days
+        min_days, max_days = limits
+        start_day = max(1, min_days - first_day_interval + 1)
+        end_day = min(self.days_in_month, max_days - first_day_interval + 1)
+        return range(start_day, end_day + 1)
+
+    def _record_brand_window_conflict(self, item, note):
+        min_days, max_days = self._brand_interval_limits(item)
+        self._record_unplaceable(
+            item, note,
+            f"距上月服务日 {min_days}~{max_days} 天内，"
+            "没有同时满足特殊要求、假期、人员容量和同店间隔的连续三日窗口",
+        )
+
+    def _plan_interval_brand_window(self, item, interval_days, week_days, specified_days, min_gap_days):
+        window_days = set(interval_days)
+        if week_days is not None:
+            window_days.intersection_update(week_days)
+        candidate_days = window_days
+        if specified_days is not None:
+            candidate_days = window_days.intersection(specified_days)
+            if item["specified_date_rule"]["mode"] == "date_range":
+                window_days = candidate_days
+
+        allowed_days = [
+            day for day in sorted(candidate_days)
+            if not self._is_holiday(day) and self._check_store_gap_constraint(item, day, min_gap_days)
+        ]
+        allowed_days, _ = self._filter_days_by_order_capacity(allowed_days, item)
         if not allowed_days:
             return None
-        return min(allowed_days, key=lambda d: self._anchored_balance_key(d, item, anchor_day))
+
+        anchor_day = (interval_days.start + interval_days.stop - 1) // 2
+        max_holidays = self.cfg["BRAND_RANGE_MAX_HOLIDAY_DAYS"]
+        best = None
+        for start_day in sorted(window_days):
+            end_day = start_day + 2
+            if start_day + 1 not in window_days or end_day not in window_days:
+                continue
+            holiday_days = self._count_holiday_days_in_range(start_day, end_day)
+            service_days = [day for day in allowed_days if start_day <= day <= end_day]
+            if not service_days:
+                continue
+            service_day = min(service_days, key=lambda day: self._anchored_balance_key(day, item, anchor_day))
+            score = (
+                holiday_days > max_holidays,
+                self._anchored_balance_key(service_day, item, anchor_day),
+                holiday_days,
+                abs(start_day + 1 - service_day),
+                start_day,
+            )
+            if best is None or score < best[0]:
+                best = (score, start_day, end_day, service_day, holiday_days)
+        return best[1:] if best else None
 
     def _plan_brand_range_window(self, anchor_day, item, allowed_end_days=None, min_gap_days=0):
         max_holiday_days = int(self.cfg.get("BRAND_RANGE_MAX_HOLIDAY_DAYS", 1))
@@ -959,7 +984,7 @@ class AutoSchedulerV2:
             anchor_day = allowed_days[0]
         return self._pick_balanced_day(allowed_days, item, anchor_day), used_relaxed
 
-    def _resolve_specified_rule_days(self, item):
+    def _resolve_specified_rule_days(self, item, interval_days=None):
         rule = item.get('specified_date_rule') or {'mode': 'none'}
         needed = self._get_needed_occurrences(item)
         mode = rule.get('mode')
@@ -971,6 +996,8 @@ class AutoSchedulerV2:
                 dt.day for dt in rule.get('dates', [])
                 if dt.month == self.cfg["MONTH"] and dt.year == self.cfg["YEAR"]
             ]
+            if interval_days is not None and rule.get("source_type") == "weekly_fixed":
+                days = [day for day in days if day in interval_days]
             days = sorted(set(days))[:needed]
             return [(day, day, day, False, extra_note) for day in days]
 
@@ -1434,14 +1461,23 @@ class AutoSchedulerV2:
 
         # 1. 特殊要求
         for item in queues['fixed']:
-            resolved_days = self._resolve_specified_rule_days(item)
+            interval_days = self._brand_interval_days(item)
+            resolved_days = self._resolve_specified_rule_days(item, interval_days)
             if not resolved_days:
-                item['specified_date_warning'] = item.get('specified_date_warning', '特殊要求无法识别')
+                if interval_days is not None:
+                    self._record_brand_window_conflict(item, "特殊要求")
+                else:
+                    item['specified_date_warning'] = item.get('specified_date_warning', '特殊要求无法识别')
                 continue
             for start_day, end_day, anchor_day, used_relaxed, note_suffix in resolved_days:
                 note = self._append_remote_tag("特殊要求", item)
                 if note_suffix:
                     note += note_suffix
+                if interval_days is not None:
+                    if len(interval_days) < 3 or anchor_day not in interval_days:
+                        self._record_brand_window_conflict(item, note)
+                        continue
+                    start_day, end_day = self._build_three_day_window(anchor_day, interval_days)
                 if self._is_holiday(anchor_day):
                     note += "[警告:假期冲撞]"
                 if not self._check_person_order_constraint(anchor_day, item):
@@ -1459,8 +1495,6 @@ class AutoSchedulerV2:
             self._assign(best, best, item, note, is_fixed=True)
 
         # 3. 配置品牌的3天范围逻辑
-        # 规则：以窗口“最后一天(end_day)”作为服务锚点日期。
-        # 若该服务人员当天工单已满额，则将 end_day 顺延到下一个可用日期，并整体平移窗口。
         # 为了“同一行政区划门店能一天多干一些”，优先按行政区划分组后再处理。
         brand_range_items = list(queues['brand_range'])
         brand_range_items.sort(
@@ -1473,6 +1507,7 @@ class AutoSchedulerV2:
             occurrences = max(1, int(round(item.get('clean_freq', 1))))
             min_gap_days = self._get_min_gap_days_for_frequency(occurrences)
             specified_allowed_end_days, specified_note = self._get_specified_brand_range_limit(item)
+            interval_days = self._brand_interval_days(item)
             target_weeks = []
             if occurrences == 2:
                 target_weeks = self._get_alternating_weeks_from_last_date(last_date)
@@ -1493,75 +1528,35 @@ class AutoSchedulerV2:
                     anchor = min(max(week_start, base_anchor), week_end)
                 else:
                     anchor = rolling_anchor
-                if specified_allowed_end_days:
-                    if allowed_end_days is None:
-                        allowed_end_days = specified_allowed_end_days
-                    else:
-                        combined_allowed_days = [
-                            day for day in allowed_end_days
-                            if day in set(specified_allowed_end_days)
-                        ]
-                        allowed_end_days = combined_allowed_days or specified_allowed_end_days
-
-                max_holiday_days = int(self.cfg.get("BRAND_RANGE_MAX_HOLIDAY_DAYS", 1))
-                holiday_note = ""
-                holiday_over_threshold = False
-                use_end_anchor = (
-                    occ_idx == 1
-                    and occurrences == 1
-                    and last_date is not None
-                    and not specified_allowed_end_days
-                    and self._is_end_anchored_brand(item)
-                    and self._is_previous_month_service(item)
-                )
-                end_anchor_window = (
-                    self._build_end_anchored_brand_window(last_date) if use_end_anchor else None
-                )
-                if use_end_anchor and end_anchor_window is None:
-                    # 本月不存在落在间隔硬区间内的日期 → 直接转异常待处理
-                    self._record_unplaceable(
-                        item,
-                        "3天范围门店",
-                        f"本月没有距上月服务日 {self._brand_interval_limits(item)[0]}~"
-                        f"{self._brand_interval_limits(item)[1]} 天的日期",
-                        start_day=1,
-                        end_day=self.days_in_month,
-                    )
-                    continue
-                if use_end_anchor:
-                    # 窗口截止日锚定上月服务日：窗口固定，服务日只在窗口内部挪；
-                    # 整段撞假期才允许整体避让（可越出间隔区间，属明确例外）。
-                    start_day, end_day, anchor_day = end_anchor_window
-                    holiday_days = self._count_holiday_days_in_range(start_day, end_day)
-                    if holiday_days > max_holiday_days:
-                        (
-                            start_day,
-                            end_day,
-                            service_day,
-                            holiday_days,
-                            _used_relaxed,
-                            holiday_over_threshold,
-                        ) = self._plan_brand_range_window(
-                            anchor_day, item, allowed_end_days=None, min_gap_days=min_gap_days
-                        )
-                        holiday_note = "-假期避让"
-                    else:
-                        service_day = self._pick_day_in_brand_window(
-                            start_day, end_day, anchor_day, item, min_gap_days=min_gap_days
-                        )
-                else:
-                    # 3天范围：优先选择假期天数更少的窗口；若无满足阈值则回退到最少假期窗口并告警
-                    start_day, end_day, service_day, holiday_days, _used_relaxed, holiday_over_threshold = self._plan_brand_range_window(
-                        anchor, item, allowed_end_days=allowed_end_days, min_gap_days=min_gap_days
-                    )
-
                 note = self._append_remote_tag("3天范围门店", item)
                 if specified_note:
                     note += specified_note
-                if holiday_note:
-                    note += holiday_note
                 if occurrences > 1:
                     note += f"-第{occ_idx}次"
+
+                max_holiday_days = int(self.cfg.get("BRAND_RANGE_MAX_HOLIDAY_DAYS", 1))
+                if interval_days is not None:
+                    window = self._plan_interval_brand_window(
+                        item, interval_days, allowed_end_days, specified_allowed_end_days, min_gap_days
+                    )
+                    if window is None:
+                        self._record_brand_window_conflict(item, note)
+                        continue
+                    start_day, end_day, service_day, holiday_days = window
+                    holiday_over_threshold = holiday_days > max_holiday_days
+                else:
+                    if specified_allowed_end_days:
+                        if allowed_end_days is None:
+                            allowed_end_days = specified_allowed_end_days
+                        else:
+                            combined_allowed_days = [
+                                day for day in allowed_end_days
+                                if day in set(specified_allowed_end_days)
+                            ]
+                            allowed_end_days = combined_allowed_days or specified_allowed_end_days
+                    start_day, end_day, service_day, holiday_days, _used_relaxed, holiday_over_threshold = self._plan_brand_range_window(
+                        anchor, item, allowed_end_days=allowed_end_days, min_gap_days=min_gap_days
+                    )
                 if occ_idx <= len(target_weeks) and service_day is not None:
                     note += f"-第{self._get_week_index(service_day)}周"
                 if holiday_days >= 3:

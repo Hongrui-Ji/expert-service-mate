@@ -60,8 +60,8 @@ NUMERIC_FIELDS = (
     ("REGULAR_MIN_GAP_DAYS_FREQ3", "常规频次3最小间隔", 0, 31),
     ("REGULAR_MIN_GAP_DAYS_FREQ4PLUS", "常规频次4+最小间隔", 0, 31),
     ("BRAND_RANGE_MAX_HOLIDAY_DAYS", "三日范围最大假期天数", 0, 3),
-    ("BRAND_RANGE_END_OFFSET_DAYS", "窗口截止=上月服务日+N天", 1, 31),
-    ("BRAND_RANGE_MIN_INTERVAL_DAYS", "三日范围最小间隔（天）", 0, 31),
+    ("BRAND_RANGE_MAX_INTERVAL_DAYS", "三日范围最大间隔（天）", 2, 35),
+    ("BRAND_RANGE_MIN_INTERVAL_DAYS", "三日范围最小间隔（天）", 0, 33),
     ("REGULAR_FREQ1_WINDOW_DAYS", "单次服务窗口天数", 1, 31),
     ("REGULAR_FREQ1_ANCHOR_DAYS", "单次服务锚点距上月天数", 0, 62),
     ("QUARTERLY_INTERVAL_MONTHS", "季度门店最小间隔（月）", 1, 24),
@@ -155,15 +155,15 @@ def _render_config_editor(base_config: dict) -> dict:
     anchor_col1, anchor_col2, _anchor_col3, _anchor_col4 = st.columns(4)
     with anchor_col1:
         end_anchor_brands = _list_editor(
-            "窗口截止锚定品牌",
+            "三日窗口有跨月间隔限制的品牌",
             base_config["BRAND_RANGE_END_ANCHOR_BRANDS"],
             "end_anchor_brand_editor",
-            "这些三日范围品牌的窗口最后一天 = 上月服务日 + N 天，窗口内 3 天即为可上门日。",
+            "有上月服务日期时，整个三日窗口都须落在设置的间隔内。",
         )
     with anchor_col2:
         st.caption(
-            "例：上月 9/13 上门、N=30 → 窗口 10/11~10/13，"
-            "实际上门日落在距上月 28~30 天；整段撞假期时才整体避让并标注「假期避让」。"
+            "例如上月 9 月 13 日服务，按 25～35 天计算，窗口必须是 10 月 8～18 日内连续 3 天。"
+            "找不到可用窗口时，门店会列入异常待处理。"
         )
 
     st.divider()
