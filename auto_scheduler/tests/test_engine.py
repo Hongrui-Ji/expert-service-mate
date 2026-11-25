@@ -108,6 +108,77 @@ def test_fixed_holiday_date_is_scheduled_with_visible_warning():
     assert "假期冲撞" in result.anomalies.iloc[0]["异常原因"]
 
 
+def test_single_weekday_requirements_search_the_whole_month():
+    dataframe = _input_rows(3)
+    dataframe["指定日期"] = ["周一", "每周五", "星期三"]
+    dataframe["本月需要服务次数"] = 2
+    config = dict(_strict_config(), MONTH=12)
+
+    result = run_schedule(dataframe, config)
+    scheduled_days = {
+        store_id: [day.day for day in days]
+        for store_id, days in result.scheduled.groupby("门店ID")["服务锚点日期"]
+    }
+
+    # 同一专家每周最多两单，周三门店使用仍有容量的第二周和第四周。
+    assert scheduled_days == {"store-0": [7, 21], "store-1": [4, 18], "store-2": [9, 23]}
+    assert result.anomalies.empty
+    assert (result.scheduled["开始日期"] == result.scheduled["截止日期"]).all()
+
+
+def test_single_weekday_moves_to_other_weeks_when_dates_are_unavailable():
+    dataframe = _input_rows(2)
+    dataframe["指定日期"] = ["每周一晚上", "7号"]
+    dataframe["本月需要服务次数"] = [2, 1]
+    config = dict(_strict_config(), MONTH=12, HOLIDAY_BLOCKS=[(21, 21)])
+
+    result = run_schedule(dataframe, config)
+    flexible = result.scheduled[result.scheduled["门店ID"] == "store-0"]
+
+    assert result.anomalies.empty
+    assert [day.day for day in flexible["服务锚点日期"]] == [14, 28]
+    assert flexible["排班逻辑"].str.contains("晚上").all()
+    assert result.scheduled.loc[result.scheduled["门店ID"] == "store-1", "服务锚点日期"].iloc[0].day == 7
+
+
+def test_single_weekday_reports_unfilled_visits_per_store():
+    dataframe = _input_rows(1)
+    dataframe["指定日期"] = "周一"
+    dataframe["本月需要服务次数"] = 2
+    config = dict(_strict_config(), MONTH=12, HOLIDAY_BLOCKS=[(21, 21), (28, 28)])
+
+    result = run_schedule(dataframe, config)
+
+    assert result.summary["成功排班数"] == result.summary["硬规则冲突数"] == 1
+    assert result.summary["未生成任务数"] == 0
+    assert result.anomalies.iloc[0]["门店ID"] == "store-0"
+    assert "指定星期" in result.anomalies.iloc[0]["异常原因"]
+
+
+def test_single_weekday_respects_remaining_monthly_workdays_for_the_combination():
+    dataframe = _input_rows(1)
+    dataframe["指定日期"] = "周一"
+    dataframe["本月需要服务次数"] = 2
+    config = dict(_strict_config(), MONTH=12, MAX_MONTHLY_WORKDAYS_PER_PERSON=1)
+
+    result = run_schedule(dataframe, config)
+
+    assert result.summary["成功排班数"] == result.summary["硬规则冲突数"] == 1
+    assert result.scheduled.iloc[0]["服务锚点日期"].day == 7
+    assert "指定星期" in result.anomalies.iloc[0]["异常原因"]
+
+
+def test_explicit_week_numbers_remain_fixed_dates():
+    dataframe = _input_rows(1)
+    dataframe["指定日期"] = "每月第二周第四周周一"
+    dataframe["本月需要服务次数"] = 2
+
+    result = run_schedule(dataframe, dict(_strict_config(), MONTH=12))
+
+    assert result.anomalies.empty
+    assert [day.day for day in result.scheduled["服务锚点日期"]] == [14, 28]
+
+
 def test_remote_and_brand_range_rules_are_preserved():
     dataframe = _input_rows(2)
     dataframe.loc[0, "行政区划"] = "张家港市"

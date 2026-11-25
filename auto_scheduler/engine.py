@@ -38,16 +38,6 @@ class ProductionScheduler(AutoSchedulerV2):
             self.person_day_order_stats = shared_capacity["days"]
             self.person_week_order_stats = shared_capacity["weeks"]
 
-    def _monthly_workday_limit(self) -> int:
-        return int(self.cfg.get("MAX_MONTHLY_WORKDAYS_PER_PERSON", 25))
-
-    def _person_workday_count(self, person: str) -> int:
-        return sum(
-            1
-            for day in range(1, self.days_in_month + 1)
-            if self.person_day_order_stats[day].get(person, 0) > 0
-        )
-
     def _day_slot_cost(self, day: int, person: str, item: dict[str, Any]) -> int:
         """本条工单在该自然日占用的日工单额度（同一宿舍组重复出勤时为 0）。"""
         group = self._dorm_group_of(item)

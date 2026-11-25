@@ -2,6 +2,7 @@ import math
 import re
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
+from itertools import combinations
 
 import pandas as pd
 
@@ -110,6 +111,16 @@ class AutoSchedulerV2:
 
     def _is_holiday(self, day):
         return day in self.blocked_days
+
+    def _monthly_workday_limit(self) -> int:
+        return int(self.cfg.get("MAX_MONTHLY_WORKDAYS_PER_PERSON", 25))
+
+    def _person_workday_count(self, person: str) -> int:
+        return sum(
+            1
+            for day in range(1, self.days_in_month + 1)
+            if self.person_day_order_stats[day].get(person, 0) > 0
+        )
 
     def _build_anchor_window(self, anchor_day, span_days):
         span_days = max(1, int(span_days))
@@ -922,17 +933,13 @@ class AutoSchedulerV2:
                 'require_different_weeks': True,
             }
 
-        # 例：每周一、每周三。继续按明确日期处理。
+        # 例：周一、每周一。整月的周一都是候选日。
         if weekday_tokens:
-            dates = []
-            for token in weekday_tokens:
-                dates.extend(self._weekday_dates(cn_weekdays[token]))
             return {
-                'mode': 'fixed_dates',
-                'dates': sorted(set(dates)),
+                'mode': 'weekday',
+                'dates': self._weekday_dates(cn_weekdays[weekday_tokens[0]]),
                 'raw': raw,
                 'time_note': time_note,
-                'source_type': 'weekly_fixed',
             }
 
         dates = [
@@ -984,6 +991,30 @@ class AutoSchedulerV2:
             anchor_day = allowed_days[0]
         return self._pick_balanced_day(allowed_days, item, anchor_day), used_relaxed
 
+    def _select_weekday_dates(self, candidate_days, item, needed):
+        is_remote = item.get("行政区划") in self.cfg["REMOTE_CITIES"]
+        min_gap = self._get_min_gap_days_for_frequency(needed, is_remote=is_remote)
+        available = [
+            day for day in candidate_days
+            if not self._is_holiday(day) and self._check_store_gap_constraint(item, day, min_gap)
+        ]
+        available, _ = self._filter_days_by_order_capacity(available, item)
+        person = self._get_service_person(item)
+        new_workdays = set()
+        remaining_workdays = self.days_in_month
+        if person:
+            remaining_workdays = max(0, self._monthly_workday_limit() - self._person_workday_count(person))
+            new_workdays = {day for day in available if self.person_day_order_stats[day].get(person, 0) == 0}
+
+        # 单个星期每月最多出现五次，按可完成次数优先、日期先后顺序检查组合。
+        for count in range(min(needed, len(available)), 0, -1):
+            for days in combinations(available, count):
+                if len(new_workdays.intersection(days)) > remaining_workdays:
+                    continue
+                if all(later - earlier >= min_gap for earlier, later in zip(days, days[1:])):
+                    return days
+        return ()
+
     def _resolve_specified_rule_days(self, item, interval_days=None):
         rule = item.get('specified_date_rule') or {'mode': 'none'}
         needed = self._get_needed_occurrences(item)
@@ -991,13 +1022,18 @@ class AutoSchedulerV2:
         time_note = rule.get('time_note')
         extra_note = f"-{time_note}" if time_note else ""
 
+        if mode == 'weekday':
+            days = [dt.day for dt in rule['dates']]
+            if interval_days is not None:
+                days = [day for day in days if day in interval_days] if len(interval_days) >= 3 else []
+            selected = self._select_weekday_dates(days, item, needed)
+            return [(day, day, day, False, "-候选星期" + extra_note) for day in selected]
+
         if mode == 'fixed_dates':
             days = [
                 dt.day for dt in rule.get('dates', [])
                 if dt.month == self.cfg["MONTH"] and dt.year == self.cfg["YEAR"]
             ]
-            if interval_days is not None and rule.get("source_type") == "weekly_fixed":
-                days = [day for day in days if day in interval_days]
             days = sorted(set(days))[:needed]
             return [(day, day, day, False, extra_note) for day in days]
 
@@ -1459,11 +1495,21 @@ class AutoSchedulerV2:
                 else:
                     queues['normal'].append(item)
 
-        # 1. 特殊要求
-        for item in queues['fixed']:
+        # 1. 特殊要求。可选整月同一星期的任务放在其他特殊要求之后。
+        for item in sorted(queues['fixed'], key=lambda entry: entry['specified_date_rule']['mode'] == 'weekday'):
             interval_days = self._brand_interval_days(item)
             resolved_days = self._resolve_specified_rule_days(item, interval_days)
-            if not resolved_days:
+            if item['specified_date_rule']['mode'] == 'weekday':
+                missing_count = self._get_needed_occurrences(item) - len(resolved_days)
+                for _ in range(missing_count):
+                    if interval_days is not None:
+                        self._record_brand_window_conflict(item, "特殊要求-候选星期")
+                    else:
+                        self._record_unplaceable(
+                            item, "特殊要求-候选星期",
+                            "指定星期内，满足假期、人员容量和同店服务间隔的日期不足",
+                        )
+            elif not resolved_days:
                 if interval_days is not None:
                     self._record_brand_window_conflict(item, "特殊要求")
                 else:
